@@ -102,9 +102,11 @@ async function main() {
     let messageObjects: Map<string, Message> = new Map() // Store actual Message objects for interactions
     let messageScrollIndex = 0
     let selectedMessageIndex = -1 // Index of selected message for actions
-    let currentMode: 'channel-select' | 'messages' | 'input' | 'react-input' = 'channel-select'
+    let currentMode: 'channel-select' | 'messages' | 'input' | 'react-input' | 'llm-review' = 'channel-select'
     let replyingToMessage: Message | null = null // Message we're replying to
     let attachedFiles: Array<{ path: string; name: string }> = [] // Files attached to current message
+    let llmOriginalText = '' // Natural-language text before LLM rewrite (when requested)
+    let llmProcessedText = '' // Text returned from LLM rewrite (when requested)
 
     // Helper to load messages
     const loadMessages = async (channelInfo: ChannelInfo) => {
@@ -198,7 +200,7 @@ async function main() {
       top: 1,
       left: '40%',
       width: '60%',
-      height: '80%',
+      height: '76%',
       content: '',
       scrollable: true,
       alwaysScroll: true,
@@ -212,9 +214,25 @@ async function main() {
       },
     })
 
+    // LLM preview box (shows processed vs original text before sending)
+    const llmPreviewBox = blessed.box({
+      top: '77%',
+      left: '40%',
+      width: '60%',
+      height: 4, // Will be dynamically adjusted
+      content: '',
+      hidden: true,
+      scrollable: true,
+      alwaysScroll: true,
+      style: {
+        fg: 'magenta',
+        bg: 'blue',
+      },
+    })
+
     // Attachments display box
     const attachmentsBox = blessed.box({
-      bottom: 3,
+      top: '85%',
       left: '40%',
       width: '60%',
       height: 3,
@@ -325,9 +343,7 @@ async function main() {
       screen.render()
     }
 
-    // Initial load
-    await loadMessages(selectedChannel)
-    updateMessagesDisplay()
+    // Initial load - just show channel list, don't load messages until user selects a channel
     updateChannelList()
 
     // Track selected index when navigating the list
@@ -599,160 +615,285 @@ async function main() {
       }
     }
 
-    // Process /attach command when Tab is pressed (optional preview)
-    inputBox.key(['tab'], () => {
-      if (currentMode === 'input') {
-        const currentValue = inputBox.getValue().trim()
-        // Extract /attach commands and preview attachments
-        const attachRegex = /\/attach\s+([^\s]+(?:\s+[^\s]+)*)/g
-        let match
-        const foundFiles: string[] = []
-        while ((match = attachRegex.exec(currentValue)) !== null) {
-          const filePaths = match[1].trim().split(/\s+/).filter(p => p.trim())
-          foundFiles.push(...filePaths)
-        }
-        if (foundFiles.length > 0) {
-          statusBox.setContent(`Found ${foundFiles.length} file(s) in /attach commands. Press Enter to send with message.`)
-          screen.render()
-        } else {
-          statusBox.setContent('Type message with /attach <path> anywhere, then press Enter to send')
-          screen.render()
-        }
+    // Helper: rewrite message text using OpenRouter LLM.
+    // IMPORTANT: This function should only receive the pure natural-language portion of the message.
+    const rewriteMessageWithLLM = async (text: string): Promise<string> => {
+      // Feature is optional – only run if configured
+      if (!config.OPENROUTER_API_KEY || !config.OPENROUTER_MODEL) {
+        return text
       }
-    })
+
+      return await new Promise<string>((resolve) => {
+        try {
+          const data = JSON.stringify({
+            model: config.OPENROUTER_MODEL,
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are a message enhancement pipeline. Your task is to rewrite Discord messages to be clearer, friendlier, and more concise. ' +
+                  'CRITICAL: Return ONLY the rewritten message text. Do NOT include any prefixes, explanations, or meta-commentary like "Here\'s a clearer version:" or "Here\'s the rewritten message:". ' +
+                  'Just output the enhanced message text directly. ' +
+                  'Preserve the intent and meaning while improving wording and tone. ' +
+                  'This is a pipeline transformation, not a conversation - output only the processed text.',
+              },
+              {
+                role: 'user',
+                content: text,
+              },
+            ],
+          })
+
+          const options: https.RequestOptions = {
+            hostname: 'openrouter.ai',
+            path: '/api/v1/chat/completions',
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${config.OPENROUTER_API_KEY}`,
+              'Content-Length': Buffer.byteLength(data),
+              // Optional but recommended headers for OpenRouter
+              'X-Title': 'dialogue-discord-cli',
+            },
+          }
+
+          const req = https.request(options, (res) => {
+            let body = ''
+            res.on('data', (chunk) => {
+              body += chunk
+            })
+            res.on('end', () => {
+              try {
+                const parsed = JSON.parse(body)
+                const rewritten =
+                  parsed?.choices?.[0]?.message?.content &&
+                  typeof parsed.choices[0].message.content === 'string'
+                    ? parsed.choices[0].message.content
+                    : text
+                resolve(rewritten)
+              } catch {
+                // On any parsing error, fall back to original text
+                resolve(text)
+              }
+            })
+          })
+
+          req.on('error', () => {
+            // Network or API error – fall back silently
+            resolve(text)
+          })
+
+          req.write(data)
+          req.end()
+        } catch {
+          // Any unexpected error – just fall back to original
+          resolve(text)
+        }
+      })
+    }
+
+    // Helper: send the current message (used both from normal flow and LLM review)
+    const sendCurrentMessage = async (finalMessageText: string) => {
+      // Use file paths directly - Discord.js accepts an array of file paths
+      const filePaths = attachedFiles.map(file => file.path)
+
+      if (!finalMessageText && filePaths.length === 0) return
+
+      try {
+        if (replyingToMessage) {
+          const options: any = {}
+          if (finalMessageText) options.content = finalMessageText
+          if (filePaths.length > 0) options.files = filePaths
+          await replyingToMessage.reply(options)
+          replyingToMessage = null
+        } else {
+          const channel = await client.channels.fetch(selectedChannel.id)
+          if (channel && channel.isTextBased() && (channel instanceof TextChannel || channel instanceof ThreadChannel)) {
+            const options: any = {}
+            if (finalMessageText) options.content = finalMessageText
+            if (filePaths.length > 0) options.files = filePaths
+            await channel.send(options)
+          }
+        }
+
+        inputBox.clearValue()
+        inputBox.setValue('')
+        clearAttachments()
+        llmOriginalText = ''
+        llmProcessedText = ''
+        llmPreviewBox.hide()
+        currentMode = 'messages'
+        messagesBox.focus()
+        await loadMessages(selectedChannel)
+        updateMessagesDisplay()
+        statusBox.setContent('✅ Message sent! - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, c=change channel')
+        screen.render()
+      } catch (err) {
+        statusBox.setContent(`❌ Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
+        screen.render()
+      }
+    }
 
     // Input handling
     inputBox.key(['enter'], async () => {
-      const fullInput = inputBox.getValue()
-      const trimmed = fullInput.trim()
-      
-      if (!trimmed && attachedFiles.length === 0) {
-        return // Don't send empty messages
+      const rawInput = inputBox.getValue()
+      if (!rawInput.trim() && attachedFiles.length === 0) {
+        return
       }
 
-      // Parse message for /attach command - can appear anywhere in the message
+      // Detect LLM routing markers (prefix or suffix) and strip them from the working text
+      let llmRequested = false
+      let fullInput = rawInput
+      if (fullInput.startsWith('llm://')) {
+        llmRequested = true
+        fullInput = fullInput.substring('llm://'.length)
+      } else if (fullInput.endsWith('\\\\:llm')) {
+        // Support \\:llm (two backslashes, colon, llm)
+        llmRequested = true
+        fullInput = fullInput.substring(0, fullInput.length - '\\\\:llm'.length)
+      }
+
+      const trimmed = fullInput.trim()
+      if (!trimmed && attachedFiles.length === 0) {
+        return
+      }
+
+      // Parse message for /attach command - simple approach: /attach "path" or /attach path
+      // Extract text and file paths
       let messageText = ''
       const filesToAttach: string[] = []
-      
-      // Find all /attach occurrences in the message
-      const attachRegex = /\/attach\s+([^\s]+(?:\s+[^\s]+)*)/g
+
+      // Simple regex: /attach followed by quoted string or unquoted path
+      const attachRegex = /\/attach\s+(?:"([^"]+)"|(\S+))/g
       let match
       let lastIndex = 0
-      const parts: Array<{ type: 'text' | 'attach'; content: string }> = []
-      
+      const textParts: string[] = []
+
       while ((match = attachRegex.exec(trimmed)) !== null) {
-        // Add text before this /attach
+        // Add text before this match
         if (match.index > lastIndex) {
           const textBefore = trimmed.substring(lastIndex, match.index).trim()
-          if (textBefore) {
-            parts.push({ type: 'text', content: textBefore })
-          }
+          if (textBefore) textParts.push(textBefore)
         }
-        
-        // Add the file paths after /attach
-        const filePaths = match[1].trim()
-        if (filePaths) {
-          parts.push({ type: 'attach', content: filePaths })
+
+        // Extract file path (quoted or unquoted)
+        const filePath = (match[1] || match[2] || '').trim()
+        if (filePath) {
+          filesToAttach.push(filePath)
         }
-        
+
         lastIndex = match.index + match[0].length
       }
-      
-      // Add remaining text after last /attach
+
+      // Add remaining text after last match
       if (lastIndex < trimmed.length) {
         const textAfter = trimmed.substring(lastIndex).trim()
-        if (textAfter) {
-          parts.push({ type: 'text', content: textAfter })
-        }
-      }
-      
-      // If no /attach found, treat entire input as message text
-      if (parts.length === 0) {
-        messageText = trimmed
-      } else {
-        // Reconstruct message text and collect file paths
-        const textParts: string[] = []
-        parts.forEach(part => {
-          if (part.type === 'text') {
-            textParts.push(part.content)
-          } else {
-            // Extract file paths from attach part
-            const paths = part.content.split(/\s+/).filter(p => p.trim())
-            filesToAttach.push(...paths)
-          }
-        })
-        messageText = textParts.join(' ').trim()
+        if (textAfter) textParts.push(textAfter)
       }
 
-      // Attach files found in /attach commands
-      const newlyAttachedFiles: string[] = []
+      messageText = textParts.join(' ').trim()
+
+      // Attach files and track success
+      // Unescape paths that come from terminal drag-and-drop (which escapes spaces as "\ ")
+      let anyAttached = false
       filesToAttach.forEach(filePath => {
-        if (attachFile(filePath)) {
-          newlyAttachedFiles.push(filePath)
+        // Remove backslash escaping from spaces (terminal drag-and-drop format: "file\ name.png" -> "file name.png")
+        // Only replace backslash-space, not all backslashes
+        const unescapedPath = filePath.replace(/\\ /g, ' ')
+        if (attachFile(unescapedPath)) {
+          anyAttached = true
         }
       })
-
-      // Send message if there's content or attachments (from previous session or newly attached)
-      if (messageText || attachedFiles.length > 0 || newlyAttachedFiles.length > 0) {
-        try {
-          // Prepare attachments - Discord.js format
-          const attachmentOptions = attachedFiles.map(file => ({
-            attachment: file.path,
-            name: file.name,
-          }))
-
-          if (replyingToMessage) {
-            // Send as reply with attachments
-            const options: any = {}
-            if (messageText) {
-              options.content = messageText
-            }
-            if (attachmentOptions.length > 0) {
-              options.files = attachmentOptions
-            }
-            await replyingToMessage.reply(options)
-            replyingToMessage = null
-            inputBox.clearValue()
-            inputBox.setValue('')
-            clearAttachments()
-            currentMode = 'messages'
-            messagesBox.focus()
-            await loadMessages(selectedChannel)
-            updateMessagesDisplay()
-            statusBox.setContent('✅ Reply sent! - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, c=change channel')
-            screen.render()
-          } else {
-            // Send as regular message with attachments
-            const channel = await client.channels.fetch(selectedChannel.id)
-            if (channel && channel.isTextBased() && (channel instanceof TextChannel || channel instanceof ThreadChannel)) {
-              const options: any = {}
-              if (messageText) {
-                options.content = messageText
-              }
-              if (attachmentOptions.length > 0) {
-                options.files = attachmentOptions
-              }
-              await channel.send(options)
-              inputBox.clearValue()
-              inputBox.setValue('')
-              clearAttachments()
-              currentMode = 'messages'
-              messagesBox.focus()
-              await loadMessages(selectedChannel)
-              updateMessagesDisplay()
-              statusBox.setContent('✅ Message sent! - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, c=change channel')
-              screen.render()
-            }
-          }
-        } catch (err) {
-          statusBox.setContent(`❌ Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
-          screen.render()
-        }
-      } else if (newlyAttachedFiles.length === 0 && filesToAttach.length > 0) {
-        // Files were specified but none were valid
-        statusBox.setContent(`❌ No valid files found. Check file paths and try again`)
+      
+      // Update display after all files are processed
+      updateAttachmentsDisplay()
+      
+      // Show error if files were specified but none were attached
+      if (filesToAttach.length > 0 && !anyAttached) {
+        statusBox.setContent('❌ No valid files found. Check file paths and try again')
         screen.render()
       }
+
+      // If no LLM requested, just send immediately
+      if (!llmRequested) {
+        if (messageText || attachedFiles.length > 0) {
+          await sendCurrentMessage(messageText)
+        } else if (filesToAttach.length > 0 && attachedFiles.length === 0) {
+          statusBox.setContent('❌ No valid files found. Check file paths and try again')
+          screen.render()
+        }
+        return
+      }
+
+      // LLM requested: rewrite messageText (natural language only), then show preview
+      llmOriginalText = messageText
+      llmProcessedText = messageText
+
+      if (messageText) {
+        try {
+          const rewritten = await rewriteMessageWithLLM(messageText)
+          llmProcessedText = rewritten || messageText
+        } catch {
+          llmProcessedText = messageText
+        }
+      }
+
+      // Format preview with proper line breaks for multi-line text
+      const previewLines: string[] = []
+      // Put controls on the same line as header so they're always visible
+      previewLines.push('LLM rewrite preview: [p=send processed] [o=send original] [e=edit processed] [O=edit original] [Esc=cancel]')
+      previewLines.push('  Processed:')
+      
+      // Split processed text by newlines and indent each line
+      const processedLines = (llmProcessedText || '(empty)').split('\n')
+      processedLines.forEach(line => {
+        previewLines.push(`    ${line}`)
+      })
+      
+      previewLines.push('  Original :')
+      
+      // Split original text by newlines and indent each line
+      const originalLines = (llmOriginalText || '(empty)').split('\n')
+      originalLines.forEach(line => {
+        previewLines.push(`    ${line}`)
+      })
+      
+      // Calculate dynamic height based on actual content:
+      // header with controls (1) + processed label (1) + processed lines + original label (1) + original lines
+      const totalLines = previewLines.length
+      // Ensure minimum height of 5 (to always show header + controls + at least some content), max at 20 lines
+      const calculatedHeight = Math.min(Math.max(5, totalLines), 20)
+      
+      llmPreviewBox.height = calculatedHeight
+      llmPreviewBox.setContent(previewLines.join('\n'))
+      llmPreviewBox.scrollTo(0) // Always start at top so controls are visible
+      
+      // Hide input box and ensure screen has focus for key bindings
+      inputBox.hide()
+      reactionInputBox.hide()
+      llmPreviewBox.show()
+      
+      // Show attachments box if there are attachments
+      if (attachedFiles.length > 0) {
+        updateAttachmentsDisplay()
+        attachmentsBox.show()
+        // Position attachments box below LLM preview (which is at 77%)
+        // Use a fixed position that won't overlap
+        attachmentsBox.top = '90%'
+        attachmentsBox.height = Math.min(attachedFiles.length + 2, 6)
+        // Adjust LLM preview height if needed to prevent overlap
+        const attachmentsHeight = attachmentsBox.height
+        if (calculatedHeight + attachmentsHeight > 18) {
+          llmPreviewBox.height = Math.max(5, 18 - attachmentsHeight)
+        }
+      } else {
+        attachmentsBox.hide()
+      }
+      
+      currentMode = 'llm-review'
+      // Remove focus from input box so screen-level keys work
+      messagesBox.focus()
+      screen.render()
     })
 
 
@@ -767,6 +908,8 @@ async function main() {
           `  📎 ${idx + 1}. ${file.name}`
         ).join('\n')
         attachmentsBox.setContent(`Attached files:\n${fileList}`)
+        // Dynamically adjust height based on number of files
+        attachmentsBox.height = Math.min(attachedFiles.length + 2, 8)
       }
       screen.render()
     }
@@ -774,21 +917,33 @@ async function main() {
     // Helper function to attach a file
     const attachFile = (filePath: string): boolean => {
       try {
-        const resolvedPath = path.resolve(filePath)
-        if (!fs.existsSync(resolvedPath)) {
+        let finalPath = filePath.trim()
+        
+        // Expand ~ to home directory
+        if (finalPath.startsWith('~')) {
+          finalPath = finalPath.replace('~', os.homedir())
+        }
+        
+        // Resolve relative paths, normalize absolute paths
+        finalPath = path.isAbsolute(finalPath) 
+          ? path.normalize(finalPath)
+          : path.resolve(finalPath)
+        
+        // Check if file exists
+        if (!fs.existsSync(finalPath)) {
           return false
         }
 
-        const stats = fs.statSync(resolvedPath)
+        const stats = fs.statSync(finalPath)
         if (!stats.isFile()) {
           return false
         }
 
-        const fileName = path.basename(resolvedPath)
-        attachedFiles.push({ path: resolvedPath, name: fileName })
+        const fileName = path.basename(finalPath)
+        attachedFiles.push({ path: finalPath, name: fileName })
         updateAttachmentsDisplay()
         return true
-      } catch (err) {
+      } catch {
         return false
       }
     }
@@ -947,11 +1102,14 @@ async function main() {
       if (currentMode === 'messages' || currentMode === 'channel-select') {
         replyingToMessage = null // Clear any reply state
         clearAttachments() // Clear any previous attachments
+        llmOriginalText = ''
+        llmProcessedText = ''
+        llmPreviewBox.hide()
         currentMode = 'input'
         reactionInputBox.hide()
         inputBox.show()
         inputBox.focus()
-        statusBox.setContent('Type message with /attach <path> anywhere (e.g., "Here is the file /attach file.txt"), Enter to send, Esc to cancel')
+        statusBox.setContent('Type message (optionally with /attach <path> and llm:// or :\\\\llm), Enter to send, Esc to cancel')
         screen.render()
       }
     })
@@ -970,7 +1128,17 @@ async function main() {
     })
 
     screen.key(['e', 'E'], async () => {
-      if (currentMode === 'messages') {
+      if (currentMode === 'llm-review') {
+        // Edit processed text (prioritize llm-review mode)
+        inputBox.show()
+        reactionInputBox.hide()
+        currentMode = 'input'
+        inputBox.setValue(llmProcessedText)
+        inputBox.focus()
+        llmPreviewBox.hide()
+        statusBox.setContent('Editing processed message. Modify text and press Enter to send, Esc to cancel')
+        screen.render()
+      } else if (currentMode === 'messages') {
         await reactToSelectedMessage()
       }
     })
@@ -979,6 +1147,53 @@ async function main() {
       if (currentMode === 'messages') {
         await downloadAttachments()
       }
+    })
+
+    // LLM review actions - these must be checked before other handlers
+    screen.key(['p', 'P'], async () => {
+      if (currentMode === 'llm-review') {
+        await sendCurrentMessage(llmProcessedText)
+      }
+    })
+
+    screen.key(['o'], async () => {
+      if (currentMode === 'llm-review') {
+        await sendCurrentMessage(llmOriginalText)
+      }
+    })
+
+    screen.key(['O'], () => {
+      if (currentMode === 'llm-review') {
+        // Edit original text
+        inputBox.show()
+        reactionInputBox.hide()
+        currentMode = 'input'
+        inputBox.setValue(llmOriginalText)
+        inputBox.focus()
+        llmPreviewBox.hide()
+        statusBox.setContent('Editing original message. Modify text and press Enter to send, Esc to cancel')
+        screen.render()
+      }
+    })
+
+    // Esc handler - mode-specific behavior
+    screen.key(['escape'], () => {
+      if (currentMode === 'llm-review') {
+        // Cancel LLM review and go back to input mode
+        llmPreviewBox.hide()
+        inputBox.show()
+        reactionInputBox.hide()
+        currentMode = 'input'
+        inputBox.focus()
+        statusBox.setContent('Type message (optionally with /attach <path> and llm:// or :\\\\llm), Enter to send, Esc to cancel')
+        screen.render()
+      } else if (currentMode === 'channel-select') {
+        // Exit application only when in channel-select mode (most rooted state)
+        screen.destroy()
+        void client.destroy()
+        process.exit(0)
+      }
+      // Other modes (messages, input, react-input) have their own Esc handlers
     })
 
     // Enter key to show actions menu or perform default action
@@ -1005,12 +1220,15 @@ async function main() {
       inputBox.setValue('')
       replyingToMessage = null // Clear reply state
       clearAttachments() // Clear attachments when canceling
+      llmOriginalText = ''
+      llmProcessedText = ''
+      llmPreviewBox.hide()
       statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, c=change channel`)
       screen.render()
     })
 
-    // Exit
-    screen.key(['escape', 'q', 'Q', 'C-c'], () => {
+    // Exit with Ctrl+C from any mode
+    screen.key(['C-c'], () => {
       screen.destroy()
       void client.destroy()
       process.exit(0)
@@ -1020,6 +1238,7 @@ async function main() {
     screen.append(statusBox)
     screen.append(channelListBox)
     screen.append(messagesBox)
+    screen.append(llmPreviewBox)
     screen.append(attachmentsBox)
     screen.append(inputBox)
     screen.append(reactionInputBox)

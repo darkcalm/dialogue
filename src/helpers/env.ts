@@ -10,4 +10,6 @@ export default cleanEnv(process.env, {
   DISCORD_BOT_TOKEN: str(),
   CLIENT_ID: str(),
   GUILD_ID: str({ default: '' }), // Optional: if not provided, commands deploy globally
+  OPENROUTER_API_KEY: str({ default: '' }), // Optional: for LLM message rewriting
+  OPENROUTER_MODEL: str({ default: '' }), // Optional: e.g. openrouter/your-model-name
 })
