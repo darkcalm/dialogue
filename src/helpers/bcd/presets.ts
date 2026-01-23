@@ -1,7 +1,7 @@
 /**
  * BCD: Basic Consultant Dialogues
  * Ported from Python to TypeScript
- * Original: https://github.com/darkcalm/bcd
+ * Original: https://replit.com/@darkcalm/bcd#main.py
  */
 
 export interface DiagramKey {

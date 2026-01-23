@@ -20,7 +20,7 @@
     "template"
   ],
   "author": "T-DaMER",
-  "repository": "https://github.com/darkcalm/bcd",
+  "repository": "https://github.com/darkcalm/dialogue",
   "license": "MIT",
   "engines": {
     "node": "^16.13.1",

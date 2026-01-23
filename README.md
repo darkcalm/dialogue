@@ -2,7 +2,7 @@
 
 A Discord bot for managing and conducting basic consultant dialogues, built with TypeScript and Discord.js.
 
-This bot is a TypeScript port of the original [darkcalm/bcd](https://github.com/darkcalm/bcd) Python implementation.
+This bot is a TypeScript port of the original [darkcalm/bcd](https://replit.com/@darkcalm/bcd#main.py) Python implementation.
 
 ## Features
 
