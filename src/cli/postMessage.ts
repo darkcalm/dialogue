@@ -367,7 +367,7 @@ async function main() {
       updateMessagesDisplay()
       currentMode = 'messages'
       messagesBox.focus()
-      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, c=change channel`)
+      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, ←=change channel`)
       screen.render()
     }
 
@@ -398,7 +398,7 @@ async function main() {
             messageScrollIndex = selectedMessageIndex
           }
         } else if (messageScrollIndex > 0) {
-          messageScrollIndex--
+        messageScrollIndex--
         }
         updateMessagesDisplay()
       }
@@ -416,14 +416,14 @@ async function main() {
             messageScrollIndex = selectedMessageIndex - 9
           }
         } else if (messageScrollIndex < recentMessages.length - 1) {
-          messageScrollIndex++
+        messageScrollIndex++
         }
         updateMessagesDisplay()
       }
     })
 
     // Global keys for mode switching
-    screen.key(['c', 'C'], () => {
+    screen.key(['left'], () => {
       if (currentMode !== 'input') {
         currentMode = 'channel-select'
         channelListBox.focus()
@@ -716,23 +716,23 @@ async function main() {
           }
         }
 
-        inputBox.clearValue()
-        inputBox.setValue('')
+            inputBox.clearValue()
+            inputBox.setValue('')
         clearAttachments()
         llmOriginalText = ''
         llmProcessedText = ''
         llmPreviewBox.hide()
-        currentMode = 'messages'
-        messagesBox.focus()
-        await loadMessages(selectedChannel)
-        updateMessagesDisplay()
+            currentMode = 'messages'
+            messagesBox.focus()
+            await loadMessages(selectedChannel)
+            updateMessagesDisplay()
         statusBox.setContent('✅ Message sent! - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, c=change channel')
-        screen.render()
-      } catch (err) {
-        statusBox.setContent(`❌ Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
-        screen.render()
+            screen.render()
+        } catch (err) {
+          statusBox.setContent(`❌ Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
+          screen.render()
+        }
       }
-    }
 
     // Input handling
     inputBox.key(['enter'], async () => {
@@ -1094,7 +1094,7 @@ async function main() {
       inputBox.show()
       currentMode = 'messages'
       messagesBox.focus()
-      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, c=change channel`)
+      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, ←=change channel`)
       screen.render()
     })
 
@@ -1223,7 +1223,7 @@ async function main() {
       llmOriginalText = ''
       llmProcessedText = ''
       llmPreviewBox.hide()
-      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, c=change channel`)
+      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, ←=change channel`)
       screen.render()
     })
 
