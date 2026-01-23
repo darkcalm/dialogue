@@ -32,6 +32,7 @@ interface MessageInfo {
   authorId: string
   content: string
   timestamp: string
+  date: Date // Full date object for date grouping
   isBot: boolean
   hasAttachments: boolean // Whether message has any attachments
   attachmentCount: number // Number of attachments
@@ -158,12 +159,14 @@ async function main() {
                 })
               }
               
+              const messageDate = new Date(msg.createdTimestamp)
               return {
                 id: msg.id,
                 author: `${authorName}${botTag}`,
                 authorId: msg.author.id,
                 content: msg.content || '(no text content)',
-                timestamp: new Date(msg.createdTimestamp).toLocaleTimeString(),
+                timestamp: messageDate.toLocaleTimeString(),
+                date: messageDate,
                 isBot: msg.author.bot,
                 hasAttachments,
                 attachmentCount,
@@ -290,6 +293,31 @@ async function main() {
       },
     })
 
+    // Helper function to format date for display
+    const formatDateHeader = (date: Date): string => {
+      const today = new Date()
+      const yesterday = new Date(today)
+      yesterday.setDate(yesterday.getDate() - 1)
+      
+      const messageDateStr = date.toDateString()
+      const todayStr = today.toDateString()
+      const yesterdayStr = yesterday.toDateString()
+      
+      if (messageDateStr === todayStr) {
+        return 'Today'
+      } else if (messageDateStr === yesterdayStr) {
+        return 'Yesterday'
+      } else {
+        // Format as "Month Day, Year" or "Mon DD, YYYY"
+        return date.toLocaleDateString('en-US', { 
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        })
+      }
+    }
+
     const updateMessagesDisplay = () => {
       if (recentMessages.length === 0) {
         messagesBox.setContent('No recent messages')
@@ -302,10 +330,23 @@ async function main() {
         Math.min(recentMessages.length, messageScrollIndex + 10)
       )
 
-      const content = visibleMessages.map((msg, idx) => {
+      const contentParts: string[] = []
+      let lastDateStr = ''
+
+      visibleMessages.forEach((msg, idx) => {
         const actualIdx = messageScrollIndex + idx
         const isSelected = actualIdx === selectedMessageIndex && currentMode === 'messages'
         const prefix = isSelected ? '▶ ' : '  '
+        
+        // Check if we need to add a date header
+        const currentDateStr = msg.date.toDateString()
+        if (currentDateStr !== lastDateStr) {
+          // Add date separator line
+          const dateHeader = formatDateHeader(msg.date)
+          contentParts.push(`\n━━━ ${dateHeader} ━━━`)
+          lastDateStr = currentDateStr
+        }
+        
         const lines = msg.content.split('\n')
         const attachmentIndicator = msg.hasAttachments 
           ? ` 📎(${msg.attachmentCount} file${msg.attachmentCount > 1 ? 's' : ''})` 
@@ -330,8 +371,10 @@ async function main() {
           reactionsDisplay = `\n${prefix}${' '.repeat(firstLinePrefix.length)}${reactionsText}`
         }
         
-        return messageLines + reactionsDisplay
-      }).join('\n\n')
+        contentParts.push(messageLines + reactionsDisplay)
+      })
+
+      const content = contentParts.join('\n\n')
 
       messagesBox.setContent(content)
       screen.render()
