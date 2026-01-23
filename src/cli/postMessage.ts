@@ -31,6 +31,7 @@ interface MessageInfo {
   isBot: boolean
   hasAttachments: boolean // Whether message has any attachments
   attachmentCount: number // Number of attachments
+  reactions: Array<{ emoji: string; count: number; name: string }> // Emoji reactions on the message
 }
 
 async function main() {
@@ -125,6 +126,32 @@ async function main() {
               const hasAttachments = msg.attachments.size > 0
               const attachmentCount = msg.attachments.size
               
+              // Fetch reactions
+              const reactions: Array<{ emoji: string; count: number; name: string }> = []
+              if (msg.reactions.cache.size > 0) {
+                msg.reactions.cache.forEach(reaction => {
+                  // Get emoji display - show name for better terminal compatibility
+                  let emojiDisplay: string
+                  let emojiName: string
+                  
+                  if (reaction.emoji.id) {
+                    // Custom emoji - show as :name: (terminal can't display custom emojis)
+                    emojiName = reaction.emoji.name || 'unknown'
+                    emojiDisplay = `:${emojiName}:`
+                  } else {
+                    // Unicode emoji - show emoji character
+                    // If terminal doesn't support it, it will show as "?" but that's a terminal limitation
+                    emojiName = reaction.emoji.name || reaction.emoji.toString()
+                    emojiDisplay = reaction.emoji.toString()
+                  }
+                  reactions.push({
+                    emoji: emojiDisplay,
+                    count: reaction.count,
+                    name: emojiName,
+                  })
+                })
+              }
+              
               return {
                 id: msg.id,
                 author: `${authorName}${botTag}`,
@@ -134,6 +161,7 @@ async function main() {
                 isBot: msg.author.bot,
                 hasAttachments,
                 attachmentCount,
+                reactions,
               }
             })
           // Start at the bottom (most recent messages) - show last 5 messages initially
@@ -270,7 +298,17 @@ async function main() {
           }
         }).join('\n')
         
-        return messageLines
+        // Add reactions display if any
+        let reactionsDisplay = ''
+        if (msg.reactions && msg.reactions.length > 0) {
+          const firstLinePrefix = `[${msg.timestamp}] ${msg.author}${attachmentIndicator}: `
+          const reactionsText = msg.reactions
+            .map(r => `${r.emoji} ${r.count}`)
+            .join('  ')
+          reactionsDisplay = `\n${prefix}${' '.repeat(firstLinePrefix.length)}${reactionsText}`
+        }
+        
+        return messageLines + reactionsDisplay
       }).join('\n\n')
 
       messagesBox.setContent(content)
