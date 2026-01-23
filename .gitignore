@@ -1,9 +1,10 @@
+# Environment variables
 .env
-node_modules
-*.log
-dist
+.env.local
+.env.*.local
 
-# yarn
+# Dependencies
+node_modules/
 .pnp.*
 .yarn/*
 !.yarn/patches
@@ -11,3 +12,43 @@ dist
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
