@@ -45,7 +45,7 @@
     "ink": "^6.6.0",
     "module-alias": "^2.2.2",
     "nodemon": "^2.0.20",
-    "prettier": "^2.8.1",
+    "prettier": "^3.8.1",
     "react": "^19.2.3",
     "source-map-support": "^0.5.21",
     "tsc-watch": "^6.0.0",
