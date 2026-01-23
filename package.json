@@ -1,14 +1,16 @@
 {
-  "name": "discord-bot-template",
+  "name": "bcd",
   "version": "1.0.0",
-  "description": "Discord bot template, built with Discord.js and TypeScript",
+  "description": "BCD (Basic Consultant Dialogues) Discord bot, built with Discord.js and TypeScript",
   "main": "dist/index.js",
   "scripts": {
-    "start": "yarn build-ts && node dist/index.js",
-    "develop": "yarn build-ts && tsc-watch --skipLibCheck --onSuccess 'node dist/index.js'",
+    "start": "npm run build-ts && node dist/index.js",
+    "develop": "npm run build-ts && tsc-watch --skipLibCheck --onSuccess 'node dist/index.js'",
     "build-ts": "tsc --skipLibCheck",
     "pretty": "prettier --check src",
-    "lint": "yarn pretty && eslint --max-warnings 0 --ext ts,tsx,json src"
+    "lint": "npm run pretty && eslint --max-warnings 0 --ext ts,tsx,json src",
+    "check-token": "npm run build-ts && node dist/scripts/checkToken.js",
+    "post": "npm run build-ts && node dist/cli/postMessage.js"
   },
   "keywords": [
     "discord-bot",
@@ -18,17 +20,21 @@
     "template"
   ],
   "author": "T-DaMER",
-  "repository": "https://github.com/T-Damer/discord-bot-template",
+  "repository": "https://github.com/darkcalm/bcd",
   "license": "MIT",
   "engines": {
     "node": "^16.13.1",
     "yarn": "^3.1.0"
   },
   "devDependencies": {
+    "@types/blessed": "^0.1.27",
     "@types/express": "^4.17.15",
+    "@types/ink": "^0.5.2",
     "@types/node": "^18.11.18",
+    "@types/react": "^19.2.9",
     "@typescript-eslint/eslint-plugin": "^5.47.0",
     "@typescript-eslint/parser": "^5.47.1",
+    "blessed": "^0.1.81",
     "eslint": "^8.30.0",
     "eslint-config-prettier": "^8.5.0",
     "eslint-plugin-import": "^2.26.0",
@@ -36,12 +42,15 @@
     "eslint-plugin-node": "^11.1.0",
     "eslint-plugin-prettier": "^4.2.1",
     "eslint-plugin-sort-imports-es6-autofix": "^0.6.0",
+    "ink": "^6.6.0",
     "module-alias": "^2.2.2",
     "nodemon": "^2.0.20",
     "prettier": "^2.8.1",
+    "react": "^19.2.3",
     "source-map-support": "^0.5.21",
     "tsc-watch": "^6.0.0",
-    "typescript": "^4.9.4"
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "@discordjs/rest": "^1.5.0",

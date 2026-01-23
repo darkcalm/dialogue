@@ -1,4 +1,4 @@
-import { Client, CommandInteraction, TextChannel } from 'discord.js'
+import { Client, ChatInputCommandInteraction, TextChannel } from 'discord.js'
 import { SlashCommandBuilder } from '@discordjs/builders'
 
 export const data = new SlashCommandBuilder()
@@ -11,7 +11,7 @@ export const data = new SlashCommandBuilder()
       .setRequired(true)
   )
 
-export async function execute(interaction: CommandInteraction, client: Client) {
+export async function execute(interaction: ChatInputCommandInteraction, client: Client) {
   if (!interaction?.channelId) return
 
   const channel = await client.channels.fetch(interaction.channelId)

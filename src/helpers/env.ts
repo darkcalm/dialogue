@@ -9,5 +9,5 @@ dotenv.config({ path: resolve(cwd(), '.env') })
 export default cleanEnv(process.env, {
   DISCORD_BOT_TOKEN: str(),
   CLIENT_ID: str(),
-  GUILD_ID: str(),
+  GUILD_ID: str({ default: '' }), // Optional: if not provided, commands deploy globally
 })

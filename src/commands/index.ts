@@ -1,2 +1,6 @@
 export * as ping from '@/commands/ping'
 export * as help from '@/commands/help'
+export * as readChannel from '@/commands/readChannel'
+export * as readThread from '@/commands/readThread'
+export * as postMessage from '@/commands/postMessage'
+export * as bcd from '@/commands/bcd'
