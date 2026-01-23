@@ -13,7 +13,11 @@ import * as path from 'path'
 import * as os from 'os'
 import * as https from 'https'
 import * as http from 'http'
+import { exec } from 'child_process'
+import { promisify } from 'util'
 import config from '@/helpers/env'
+
+const execAsync = promisify(exec)
 
 interface ChannelInfo {
   id: string
@@ -367,7 +371,7 @@ async function main() {
       updateMessagesDisplay()
       currentMode = 'messages'
       messagesBox.focus()
-      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, ←=change channel`)
+      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, u=open URLs, i=send, ←=change channel`)
       screen.render()
     }
 
@@ -527,6 +531,75 @@ async function main() {
     }
 
     // Download attachments from selected message
+    // Helper function to extract URLs from text
+    const extractUrls = (text: string): string[] => {
+      // Match URLs (http, https, www, or common protocols)
+      const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]*\.[a-zA-Z]{2,}[^\s]*)/gi
+      const matches = text.match(urlRegex)
+      return matches ? matches.filter(url => {
+        // Filter out URLs that are clearly not valid (e.g., just "www" or incomplete)
+        return url.length > 4 && (url.startsWith('http') || url.includes('.'))
+      }) : []
+    }
+
+    // Helper function to open URL in browser (cross-platform)
+    const openUrlInBrowser = async (url: string): Promise<void> => {
+      const platform = os.platform()
+      let command: string
+
+      // Ensure URL has protocol
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://' + url
+      }
+
+      if (platform === 'darwin') {
+        // macOS
+        command = `open "${url}"`
+      } else if (platform === 'win32') {
+        // Windows
+        command = `start "" "${url}"`
+      } else {
+        // Linux and others
+        command = `xdg-open "${url}"`
+      }
+
+      try {
+        await execAsync(command)
+      } catch (err) {
+        throw new Error(`Failed to open browser: ${err instanceof Error ? err.message : 'Unknown error'}`)
+      }
+    }
+
+    // Helper function to open URLs from selected message
+    const openUrlsFromSelectedMessage = async () => {
+      if (selectedMessageIndex < 0 || selectedMessageIndex >= recentMessages.length) {
+        statusBox.setContent('❌ No message selected')
+        screen.render()
+        return
+      }
+
+      const messageInfo = recentMessages[selectedMessageIndex]
+      const urls = extractUrls(messageInfo.content)
+
+      if (urls.length === 0) {
+        statusBox.setContent('❌ No URLs found in message')
+        screen.render()
+        return
+      }
+
+      try {
+        // Open all URLs
+        for (const url of urls) {
+          await openUrlInBrowser(url)
+        }
+        statusBox.setContent(`✅ Opened ${urls.length} URL(s) in browser`)
+        screen.render()
+      } catch (err) {
+        statusBox.setContent(`❌ Error opening URLs: ${err instanceof Error ? err.message : 'Unknown error'}`)
+        screen.render()
+      }
+    }
+
     const downloadAttachments = async () => {
       if (selectedMessageIndex < 0 || selectedMessageIndex >= recentMessages.length) {
         statusBox.setContent('❌ No message selected')
@@ -726,7 +799,7 @@ async function main() {
             messagesBox.focus()
             await loadMessages(selectedChannel)
             updateMessagesDisplay()
-        statusBox.setContent('✅ Message sent! - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, c=change channel')
+        statusBox.setContent('✅ Message sent! - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, u=open URLs, i=send, ←=change channel')
             screen.render()
         } catch (err) {
           statusBox.setContent(`❌ Error: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -1094,7 +1167,7 @@ async function main() {
       inputBox.show()
       currentMode = 'messages'
       messagesBox.focus()
-      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, ←=change channel`)
+      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, u=open URLs, i=send, ←=change channel`)
       screen.render()
     })
 
@@ -1146,6 +1219,12 @@ async function main() {
     screen.key(['f', 'F'], async () => {
       if (currentMode === 'messages') {
         await downloadAttachments()
+      }
+    })
+
+    screen.key(['u', 'U'], async () => {
+      if (currentMode === 'messages') {
+        await openUrlsFromSelectedMessage()
       }
     })
 
@@ -1206,6 +1285,9 @@ async function main() {
         if (canDelete) actions.push('d=delete')
         actions.push('r=reply', 'e=react')
         if (messageInfo.hasAttachments) actions.push('f=download')
+        // Check if message has URLs
+        const urls = extractUrls(messageInfo.content)
+        if (urls.length > 0) actions.push('u=open URLs')
         statusBox.setContent(`Selected: ${messageInfo.author} - ${actions.join(', ')}`)
         screen.render()
       }
@@ -1223,7 +1305,7 @@ async function main() {
       llmOriginalText = ''
       llmProcessedText = ''
       llmPreviewBox.hide()
-      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, i=send, ←=change channel`)
+      statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, Enter to act, d=delete, r=reply, e=react, f=download, u=open URLs, i=send, ←=change channel`)
       screen.render()
     })
 
