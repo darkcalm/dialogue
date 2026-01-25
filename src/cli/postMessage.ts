@@ -15,6 +15,7 @@ import * as https from 'https'
 import * as http from 'http'
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import { emojify, getEmoji } from './shared'
 import config from '@/helpers/env'
 
 const execAsync = promisify(exec)
@@ -24,6 +25,11 @@ interface ChannelInfo {
   name: string
   type: string
   guildName?: string
+}
+
+interface ReplyInfo {
+  author: string
+  content: string // Truncated preview of the replied message
 }
 
 interface MessageInfo {
@@ -37,6 +43,7 @@ interface MessageInfo {
   hasAttachments: boolean // Whether message has any attachments
   attachmentCount: number // Number of attachments
   reactions: Array<{ emoji: string; count: number; name: string }> // Emoji reactions on the message
+  replyTo?: ReplyInfo // Information about the message being replied to
 }
 
 async function main() {
@@ -98,6 +105,7 @@ async function main() {
     // Create Blessed screen
     const screen = blessed.screen({
       smartCSR: true,
+      fullUnicode: true,
       title: 'Discord Bot CLI',
     })
 
@@ -120,65 +128,115 @@ async function main() {
         if (channel && channel.isTextBased() && (channel instanceof TextChannel || channel instanceof ThreadChannel)) {
           const messages = await channel.messages.fetch({ limit: 20 })
           messageObjects.clear() // Clear old message objects
-          recentMessages = Array.from(messages.values())
-            .slice(0, 15) // Show last 15 messages (including bot messages)
-            .reverse()
-            .map(msg => {
-              // Store the actual Message object
-              messageObjects.set(msg.id, msg)
-              const authorName = msg.author.displayName || msg.author.username
-              const botTag = msg.author.bot ? ' [BOT]' : ''
-              
-              // Check for attachments
-              const hasAttachments = msg.attachments.size > 0
-              const attachmentCount = msg.attachments.size
-              
-              // Fetch reactions
-              const reactions: Array<{ emoji: string; count: number; name: string }> = []
-              if (msg.reactions.cache.size > 0) {
-                msg.reactions.cache.forEach(reaction => {
-                  // Get emoji display - show name for better terminal compatibility
-                  let emojiDisplay: string
-                  let emojiName: string
-                  
-                  if (reaction.emoji.id) {
-                    // Custom emoji - show as :name: (terminal can't display custom emojis)
-                    emojiName = reaction.emoji.name || 'unknown'
-                    emojiDisplay = `:${emojiName}:`
-                  } else {
-                    // Unicode emoji - show emoji character
-                    // If terminal doesn't support it, it will show as "?" but that's a terminal limitation
-                    emojiName = reaction.emoji.name || reaction.emoji.toString()
-                    emojiDisplay = reaction.emoji.toString()
-                  }
-                  reactions.push({
-                    emoji: emojiDisplay,
-                    count: reaction.count,
-                    name: emojiName,
-                  })
+          
+          const messagesArray = Array.from(messages.values()).slice(0, 15).reverse()
+          
+          // Build a map of message IDs for reply lookups
+          const messageMap = new Map<string, Message>()
+          messagesArray.forEach(msg => messageMap.set(msg.id, msg))
+          
+          const result: MessageInfo[] = []
+          
+          for (const msg of messagesArray) {
+            // Store the actual Message object
+            messageObjects.set(msg.id, msg)
+            const authorName = msg.author.displayName || msg.author.username
+            const botTag = msg.author.bot ? ' [BOT]' : ''
+            
+            // Check for attachments
+            const hasAttachments = msg.attachments.size > 0
+            const attachmentCount = msg.attachments.size
+            
+            // Fetch reactions
+            const reactions: Array<{ emoji: string; count: number; name: string }> = []
+            if (msg.reactions.cache.size > 0) {
+              msg.reactions.cache.forEach(reaction => {
+                // Get emoji display - show name for better terminal compatibility
+                let emojiDisplay: string
+                let emojiName: string
+                
+                if (reaction.emoji.id) {
+                  // Custom emoji - show as :name: (terminal can't display custom emojis)
+                  emojiName = reaction.emoji.name || 'unknown'
+                  emojiDisplay = `:${emojiName}:`
+                } else {
+                  // Unicode emoji - show emoji character
+                  // If terminal doesn't support it, it will show as "?" but that's a terminal limitation
+                  emojiName = reaction.emoji.name || reaction.emoji.toString()
+                  emojiDisplay = reaction.emoji.toString()
+                }
+                reactions.push({
+                  emoji: emojiDisplay,
+                  count: reaction.count,
+                  name: emojiName,
                 })
+              })
+            }
+            
+            // Check if this message is a reply
+            let replyTo: ReplyInfo | undefined
+            if (msg.reference && msg.reference.messageId) {
+              try {
+                // First check if the referenced message is in our current batch
+                let referencedMsg = messageMap.get(msg.reference.messageId)
+                
+                // If not in batch, try to fetch it
+                if (!referencedMsg) {
+                  referencedMsg = await channel.messages.fetch(msg.reference.messageId).catch(() => undefined)
+                }
+                
+                if (referencedMsg) {
+                  const refAuthorName = referencedMsg.author.displayName || referencedMsg.author.username
+                  const refBotTag = referencedMsg.author.bot ? ' [BOT]' : ''
+                  const refContent = emojify(referencedMsg.content || '(no text content)')
+                  // Truncate to 50 chars for preview
+                  const contentPreview = refContent.length > 50 
+                    ? refContent.substring(0, 50) + '...' 
+                    : refContent
+                  
+                  replyTo = {
+                    author: `${refAuthorName}${refBotTag}`,
+                    content: contentPreview.replace(/\n/g, ' '), // Replace newlines with spaces
+                  }
+                }
+              } catch {
+                // Couldn't fetch referenced message, leave replyTo undefined
               }
-              
-              const messageDate = new Date(msg.createdTimestamp)
-              return {
-                id: msg.id,
-                author: `${authorName}${botTag}`,
-                authorId: msg.author.id,
-                content: msg.content || '(no text content)',
-                timestamp: messageDate.toLocaleTimeString(),
-                date: messageDate,
-                isBot: msg.author.bot,
-                hasAttachments,
-                attachmentCount,
-                reactions,
-              }
+            }
+            
+            const messageDate = new Date(msg.createdTimestamp)
+            // Convert emoji shortcodes to Unicode in message content
+            const processedContent = emojify(msg.content || '(no text content)')
+            
+            result.push({
+              id: msg.id,
+              author: `${authorName}${botTag}`,
+              authorId: msg.author.id,
+              content: processedContent,
+              timestamp: messageDate.toLocaleTimeString(),
+              date: messageDate,
+              isBot: msg.author.bot,
+              hasAttachments,
+              attachmentCount,
+              reactions,
+              replyTo,
             })
+          }
+          
+          recentMessages = result
           // Start at the bottom (most recent messages) - show last 5 messages initially
           messageScrollIndex = Math.max(0, recentMessages.length - 5)
           selectedMessageIndex = -1 // Reset selection
+        } else {
+          recentMessages = []
+          statusBox.setContent(`❌ Cannot access channel: ${channelInfo.name}`)
+          screen.render()
         }
       } catch (err) {
-        // Silently fail
+        recentMessages = []
+        const errorMsg = err instanceof Error ? err.message : 'Unknown error'
+        statusBox.setContent(`❌ Error loading messages: ${errorMsg}`)
+        screen.render()
       }
     }
 
@@ -347,6 +405,12 @@ async function main() {
           lastDateStr = currentDateStr
         }
         
+        // Add reply indicator if this message is a reply
+        let replyLine = ''
+        if (msg.replyTo) {
+          replyLine = `${prefix}  ↳ Replying to ${msg.replyTo.author}: ${msg.replyTo.content}\n`
+        }
+        
         const lines = msg.content.split('\n')
         const attachmentIndicator = msg.hasAttachments 
           ? ` 📎(${msg.attachmentCount} file${msg.attachmentCount > 1 ? 's' : ''})` 
@@ -371,7 +435,7 @@ async function main() {
           reactionsDisplay = `\n${prefix}${' '.repeat(firstLinePrefix.length)}${reactionsText}`
         }
         
-        contentParts.push(messageLines + reactionsDisplay)
+        contentParts.push(replyLine + messageLines + reactionsDisplay)
       })
 
       const content = contentParts.join('\n\n')
@@ -1078,7 +1142,7 @@ async function main() {
       updateAttachmentsDisplay()
     }
 
-    // Helper function to resolve emoji from input
+    // Helper function to resolve emoji from input (using shared emoji utilities)
     const resolveEmoji = async (input: string, channel: TextChannel | ThreadChannel): Promise<string | null> => {
       const trimmed = input.trim()
       
@@ -1089,8 +1153,7 @@ async function main() {
       }
       
       // Check if it's a Unicode emoji (contains emoji characters)
-      const emojiRegex = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{1F900}-\u{1F9FF}]|[\u{1F1E0}-\u{1F1FF}]/u
-      if (emojiRegex.test(trimmed)) {
+      if (/^\p{Emoji}/u.test(trimmed) && !trimmed.startsWith(':')) {
         return trimmed
       }
       
@@ -1099,52 +1162,28 @@ async function main() {
       if (nameMatch) {
         const emojiName = nameMatch[1]
         
-        // Try to find in guild emojis
+        // Try to find in guild emojis first
         if (channel.guild) {
-          const customEmoji = channel.guild.emojis.cache.find(emoji => emoji.name === emojiName)
+          const customEmoji = channel.guild.emojis.cache.find(e => e.name?.toLowerCase() === emojiName.toLowerCase())
           if (customEmoji) {
             return customEmoji.toString() // Returns <:name:id> format
           }
         }
         
-        // Try common Unicode emoji mappings
-        const commonEmojis: Record<string, string> = {
-          'octopus': '🐙',
-          'thumbsup': '👍',
-          'thumbsdown': '👎',
-          'heart': '❤️',
-          'fire': '🔥',
-          'smile': '😄',
-          'laughing': '😂',
-          'wink': '😉',
-          'thinking': '🤔',
-          'eyes': '👀',
-          'wave': '👋',
-          'clap': '👏',
-          'ok_hand': '👌',
-          'pray': '🙏',
-          'muscle': '💪',
-          'party': '🎉',
-          'tada': '🎉',
-          'confetti_ball': '🎊',
-          'balloon': '🎈',
-          'cake': '🎂',
-          'gift': '🎁',
-          'star': '⭐',
-          'sparkles': '✨',
-          'check': '✅',
-          'cross': '❌',
-          'warning': '⚠️',
-          'exclamation': '❗',
-          'question': '❓',
-        }
-        
-        if (commonEmojis[emojiName.toLowerCase()]) {
-          return commonEmojis[emojiName.toLowerCase()]
+        // Use node-emoji for shortcode lookup
+        const unicodeEmoji = getEmoji(emojiName)
+        if (unicodeEmoji) {
+          return unicodeEmoji
         }
         
         // If not found, return null to show error
         return null
+      }
+      
+      // Try without colons - maybe they typed just the name
+      const unicodeEmoji = getEmoji(trimmed)
+      if (unicodeEmoji) {
+        return unicodeEmoji
       }
       
       // If it doesn't match any format, try using it directly (might be a partial custom emoji)

@@ -10,7 +10,8 @@
     "pretty": "prettier --check src",
     "lint": "npm run pretty && eslint --max-warnings 0 --ext ts,tsx,json src",
     "check-token": "npm run build-ts && node dist/scripts/checkToken.js",
-    "post": "npm run build-ts && node dist/cli/postMessage.js"
+    "post": "npm run build-ts && node dist/cli/postMessage.js",
+    "inbox": "npm run build-ts && node dist/cli/inbox.js"
   },
   "keywords": [
     "discord-bot",
@@ -57,7 +58,9 @@
     "discord.js": "^14.7.1",
     "dotenv": "^16.0.3",
     "envalid": "^7.3.1",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "node-emoji": "^2.2.0",
+    "string-width": "^8.1.0"
   },
   "_moduleAliases": {
     "@": "dist"
