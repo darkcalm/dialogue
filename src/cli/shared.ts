@@ -163,15 +163,16 @@ export const markChannelVisited = (channelId: string, lastMessageId?: string): v
 export const loadMessages = async (
   client: Client,
   channelInfo: ChannelInfo,
-  messageObjects: Map<string, Message>
+  messageObjects: Map<string, Message>,
+  limit: number = 20
 ): Promise<MessageInfo[]> => {
   try {
     const channel = await client.channels.fetch(channelInfo.id)
     if (channel && channel.isTextBased() && (channel instanceof TextChannel || channel instanceof ThreadChannel)) {
-      const messages = await channel.messages.fetch({ limit: 20 })
+      const messages = await channel.messages.fetch({ limit })
       messageObjects.clear()
       
-      const messagesArray = Array.from(messages.values()).slice(0, 15).reverse()
+      const messagesArray = Array.from(messages.values()).reverse()
       
       // Build a map of message IDs to their info for reply lookups
       const messageMap = new Map<string, Message>()
@@ -264,6 +265,118 @@ export const loadMessages = async (
     console.error('Error loading messages:', err)
   }
   return []
+}
+
+/**
+ * Load older messages before a given message ID (for infinite scrolling)
+ * Returns messages in chronological order (oldest first)
+ */
+export const loadOlderMessages = async (
+  client: Client,
+  channelInfo: ChannelInfo,
+  beforeMessageId: string,
+  messageObjects: Map<string, Message>,
+  existingMessages: MessageInfo[],
+  limit: number = 20
+): Promise<MessageInfo[]> => {
+  try {
+    const channel = await client.channels.fetch(channelInfo.id)
+    if (channel && channel.isTextBased() && (channel instanceof TextChannel || channel instanceof ThreadChannel)) {
+      const messages = await channel.messages.fetch({ limit, before: beforeMessageId })
+      
+      if (messages.size === 0) {
+        return existingMessages // No more messages
+      }
+      
+      const messagesArray = Array.from(messages.values()).reverse()
+      
+      // Build a map including both existing and new messages for reply lookups
+      const messageMap = new Map<string, Message>()
+      messagesArray.forEach(msg => messageMap.set(msg.id, msg))
+      
+      const newMessages: MessageInfo[] = []
+      
+      for (const msg of messagesArray) {
+        messageObjects.set(msg.id, msg)
+        const authorName = msg.author.displayName || msg.author.username
+        const botTag = msg.author.bot ? ' [BOT]' : ''
+        
+        const hasAttachments = msg.attachments.size > 0
+        const attachmentCount = msg.attachments.size
+        
+        const reactions: Array<{ emoji: string; count: number; name: string }> = []
+        if (msg.reactions.cache.size > 0) {
+          msg.reactions.cache.forEach(reaction => {
+            let emojiDisplay: string
+            let emojiName: string
+            
+            if (reaction.emoji.id) {
+              emojiName = reaction.emoji.name || 'unknown'
+              emojiDisplay = `:${emojiName}:`
+            } else {
+              emojiName = reaction.emoji.name || reaction.emoji.toString()
+              emojiDisplay = reaction.emoji.toString()
+            }
+            reactions.push({
+              emoji: emojiDisplay,
+              count: reaction.count,
+              name: emojiName,
+            })
+          })
+        }
+        
+        let replyTo: ReplyInfo | undefined
+        if (msg.reference && msg.reference.messageId) {
+          try {
+            let referencedMsg = messageMap.get(msg.reference.messageId)
+            
+            if (!referencedMsg) {
+              referencedMsg = await channel.messages.fetch(msg.reference.messageId).catch(() => undefined)
+            }
+            
+            if (referencedMsg) {
+              const refAuthorName = referencedMsg.author.displayName || referencedMsg.author.username
+              const refBotTag = referencedMsg.author.bot ? ' [BOT]' : ''
+              const refContent = emojify(referencedMsg.content || '(no text content)')
+              const contentPreview = refContent.length > 50 
+                ? refContent.substring(0, 50) + '...' 
+                : refContent
+              
+              replyTo = {
+                author: `${refAuthorName}${refBotTag}`,
+                content: contentPreview.replace(/\n/g, ' '),
+              }
+            }
+          } catch {
+            // Couldn't fetch referenced message
+          }
+        }
+        
+        const messageDate = new Date(msg.createdTimestamp)
+        const processedContent = emojify(msg.content || '(no text content)')
+        
+        newMessages.push({
+          id: msg.id,
+          author: `${authorName}${botTag}`,
+          authorId: msg.author.id,
+          content: processedContent,
+          timestamp: messageDate.toLocaleTimeString(),
+          date: messageDate,
+          isBot: msg.author.bot,
+          hasAttachments,
+          attachmentCount,
+          reactions,
+          replyTo,
+        })
+      }
+      
+      // Prepend new messages to existing ones (older messages go first)
+      return [...newMessages, ...existingMessages]
+    }
+  } catch (err) {
+    console.error('Error loading older messages:', err)
+  }
+  return existingMessages
 }
 
 // ==================== URL Helpers ====================

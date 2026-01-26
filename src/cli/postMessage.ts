@@ -15,7 +15,7 @@ import * as https from 'https'
 import * as http from 'http'
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import { emojify, getEmoji } from './shared'
+import { emojify, getEmoji, loadOlderMessages, MessageInfo as SharedMessageInfo } from './shared'
 import config from '@/helpers/env'
 
 const execAsync = promisify(exec)
@@ -121,6 +121,8 @@ async function main() {
     let attachedFiles: Array<{ path: string; name: string }> = [] // Files attached to current message
     let llmOriginalText = '' // Natural-language text before LLM rewrite (when requested)
     let llmProcessedText = '' // Text returned from LLM rewrite (when requested)
+    let isLoadingOlderMessages = false
+    let hasMoreOlderMessages = true
 
     // Helper to load messages
     const loadMessages = async (channelInfo: ChannelInfo) => {
@@ -469,6 +471,10 @@ async function main() {
       // Use the tracked selectedChannelIndex
       const newChannel = channelList[selectedChannelIndex]
       
+      // Reset infinite scroll state for new channel
+      hasMoreOlderMessages = true
+      isLoadingOlderMessages = false
+      
       // Always reload messages, even if it's the same channel (to get latest messages)
       selectedChannel = newChannel
       await loadMessages(selectedChannel)
@@ -497,9 +503,49 @@ async function main() {
     // Make sure channel list has focus initially
     channelListBox.focus()
 
+    // Helper to load older messages when scrolling to top
+    const tryLoadOlderMessages = async () => {
+      if (isLoadingOlderMessages || !hasMoreOlderMessages || recentMessages.length === 0) {
+        return
+      }
+      
+      isLoadingOlderMessages = true
+      statusBox.setContent('Loading older messages...')
+      screen.render()
+      
+      const oldestMessageId = recentMessages[0].id
+      const previousLength = recentMessages.length
+      
+      recentMessages = await loadOlderMessages(
+        client,
+        selectedChannel,
+        oldestMessageId,
+        messageObjects,
+        recentMessages as SharedMessageInfo[],
+        20
+      ) as MessageInfo[]
+      
+      const newMessagesCount = recentMessages.length - previousLength
+      
+      if (newMessagesCount === 0) {
+        hasMoreOlderMessages = false
+        statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - No more older messages`)
+      } else {
+        // Adjust scroll and selection indices to account for new messages
+        messageScrollIndex += newMessagesCount
+        if (selectedMessageIndex >= 0) {
+          selectedMessageIndex += newMessagesCount
+        }
+        statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - Loaded ${newMessagesCount} older messages`)
+      }
+      
+      isLoadingOlderMessages = false
+      updateMessagesDisplay()
+    }
+
     // Messages navigation - up/down scroll messages when in messages mode
     // Only bind to messagesBox, not screen, to avoid interfering with channel list navigation
-    messagesBox.key(['up', 'k'], () => {
+    messagesBox.key(['up', 'k'], async () => {
       if (currentMode === 'messages' && recentMessages.length > 0) {
         if (selectedMessageIndex === -1) {
           // Initialize selection to the last visible message
@@ -513,6 +559,12 @@ async function main() {
         } else if (messageScrollIndex > 0) {
         messageScrollIndex--
         }
+        
+        // Trigger infinite scroll when reaching the top
+        if (selectedMessageIndex <= 2 && hasMoreOlderMessages && !isLoadingOlderMessages) {
+          await tryLoadOlderMessages()
+        }
+        
         updateMessagesDisplay()
       }
     })
@@ -536,7 +588,7 @@ async function main() {
     })
 
     // Mouse wheel scroll: channel list and messages (same as ↑↓)
-    const scrollMessagesUp = () => {
+    const scrollMessagesUp = async () => {
       if (currentMode === 'messages' && recentMessages.length > 0) {
         if (selectedMessageIndex === -1) {
           selectedMessageIndex = Math.min(messageScrollIndex + 9, recentMessages.length - 1)
@@ -548,6 +600,12 @@ async function main() {
         } else if (messageScrollIndex > 0) {
           messageScrollIndex--
         }
+        
+        // Trigger infinite scroll when reaching the top
+        if (selectedMessageIndex <= 2 && hasMoreOlderMessages && !isLoadingOlderMessages) {
+          await tryLoadOlderMessages()
+        }
+        
         updateMessagesDisplay()
         screen.render()
       }

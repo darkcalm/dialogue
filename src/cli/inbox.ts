@@ -15,6 +15,7 @@ import {
   MessageInfo,
   createUIComponents,
   loadMessages,
+  loadOlderMessages,
   loadVisitData,
   markChannelVisited,
   saveVisitData,
@@ -222,6 +223,8 @@ async function main() {
     let attachedFiles: Array<{ path: string; name: string }> = []
     let llmOriginalText = ''
     let llmProcessedText = ''
+    let isLoadingOlderMessages = false
+    let hasMoreOlderMessages = true
 
     // Build display list with headers
     const buildChannelDisplayList = (): string[] => {
@@ -400,6 +403,10 @@ async function main() {
       selectedChannel = channel
       selectedChannelIndex = channelList.indexOf(channel)
       
+      // Reset infinite scroll state for new channel
+      hasMoreOlderMessages = true
+      isLoadingOlderMessages = false
+      
       recentMessages = await loadMessages(client, selectedChannel, messageObjects)
       
       // Mark channel as visited
@@ -416,8 +423,48 @@ async function main() {
       ui.screen.render()
     })
 
+    // Helper to load older messages when scrolling to top
+    const tryLoadOlderMessages = async () => {
+      if (isLoadingOlderMessages || !hasMoreOlderMessages || recentMessages.length === 0) {
+        return
+      }
+      
+      isLoadingOlderMessages = true
+      ui.statusBox.setContent('Loading older messages...')
+      ui.screen.render()
+      
+      const oldestMessageId = recentMessages[0].id
+      const previousLength = recentMessages.length
+      
+      recentMessages = await loadOlderMessages(
+        client,
+        selectedChannel,
+        oldestMessageId,
+        messageObjects,
+        recentMessages,
+        20
+      )
+      
+      const newMessagesCount = recentMessages.length - previousLength
+      
+      if (newMessagesCount === 0) {
+        hasMoreOlderMessages = false
+        ui.statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - No more older messages`)
+      } else {
+        // Adjust scroll and selection indices to account for new messages
+        messageScrollIndex += newMessagesCount
+        if (selectedMessageIndex >= 0) {
+          selectedMessageIndex += newMessagesCount
+        }
+        ui.statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - Loaded ${newMessagesCount} older messages`)
+      }
+      
+      isLoadingOlderMessages = false
+      updateMessagesDisplay()
+    }
+
     // Message navigation
-    ui.messagesBox.key(['up', 'k'], () => {
+    ui.messagesBox.key(['up', 'k'], async () => {
       if (currentMode === 'messages' && recentMessages.length > 0) {
         if (selectedMessageIndex === -1) {
           selectedMessageIndex = Math.min(messageScrollIndex + 9, recentMessages.length - 1)
@@ -429,6 +476,12 @@ async function main() {
         } else if (messageScrollIndex > 0) {
           messageScrollIndex--
         }
+        
+        // Trigger infinite scroll when reaching the top
+        if (selectedMessageIndex <= 2 && hasMoreOlderMessages && !isLoadingOlderMessages) {
+          await tryLoadOlderMessages()
+        }
+        
         updateMessagesDisplay()
       }
     })
@@ -450,7 +503,7 @@ async function main() {
     })
 
     // Mouse wheel scroll: channel list and messages (same as ↑↓)
-    const scrollMessagesUp = () => {
+    const scrollMessagesUp = async () => {
       if (currentMode === 'messages' && recentMessages.length > 0) {
         if (selectedMessageIndex === -1) {
           selectedMessageIndex = Math.min(messageScrollIndex + 9, recentMessages.length - 1)
@@ -462,6 +515,12 @@ async function main() {
         } else if (messageScrollIndex > 0) {
           messageScrollIndex--
         }
+        
+        // Trigger infinite scroll when reaching the top
+        if (selectedMessageIndex <= 2 && hasMoreOlderMessages && !isLoadingOlderMessages) {
+          await tryLoadOlderMessages()
+        }
+        
         updateMessagesDisplay()
         ui.screen.render()
       }
