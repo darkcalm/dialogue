@@ -371,7 +371,7 @@ async function main() {
 
     // Initial load
     updateChannelList()
-    ui.statusBox.setContent('Discord Inbox - ↑↓ to navigate, → to select channel, Esc to exit')
+    ui.statusBox.setContent('Discord Inbox - ↑↓ mouse scroll · → select channel · Esc exit')
 
     // Channel navigation
     ui.channelListBox.on('select item', (item, index) => {
@@ -449,6 +449,54 @@ async function main() {
       }
     })
 
+    // Mouse wheel scroll: channel list and messages (same as ↑↓)
+    const scrollMessagesUp = () => {
+      if (currentMode === 'messages' && recentMessages.length > 0) {
+        if (selectedMessageIndex === -1) {
+          selectedMessageIndex = Math.min(messageScrollIndex + 9, recentMessages.length - 1)
+        } else if (selectedMessageIndex > 0) {
+          selectedMessageIndex--
+          if (selectedMessageIndex < messageScrollIndex) {
+            messageScrollIndex = selectedMessageIndex
+          }
+        } else if (messageScrollIndex > 0) {
+          messageScrollIndex--
+        }
+        updateMessagesDisplay()
+        ui.screen.render()
+      }
+    }
+    const scrollMessagesDown = () => {
+      if (currentMode === 'messages' && recentMessages.length > 0) {
+        if (selectedMessageIndex === -1) {
+          selectedMessageIndex = messageScrollIndex
+        } else if (selectedMessageIndex < recentMessages.length - 1) {
+          selectedMessageIndex++
+          if (selectedMessageIndex >= messageScrollIndex + 10) {
+            messageScrollIndex = selectedMessageIndex - 9
+          }
+        } else if (messageScrollIndex < recentMessages.length - 1) {
+          messageScrollIndex++
+        }
+        updateMessagesDisplay()
+        ui.screen.render()
+      }
+    }
+    ui.messagesBox.on('wheelup', scrollMessagesUp)
+    ui.messagesBox.on('wheeldown', scrollMessagesDown)
+    ui.channelListBox.on('wheelup', () => {
+      if (currentMode === 'channel-select') {
+        ;(ui.channelListBox as blessed.Widgets.ListElement).up(1)
+        ui.screen.render()
+      }
+    })
+    ui.channelListBox.on('wheeldown', () => {
+      if (currentMode === 'channel-select') {
+        ;(ui.channelListBox as blessed.Widgets.ListElement).down(1)
+        ui.screen.render()
+      }
+    })
+
     // Helper to move channel to visited group after viewing
     const moveChannelToVisited = (channel: InboxChannelInfo) => {
       if (channel.group === 'visited') return // Already visited
@@ -498,7 +546,7 @@ async function main() {
         
         currentMode = 'channel-select'
         ui.channelListBox.focus()
-        ui.statusBox.setContent('Discord Inbox - ↑↓ to navigate, → to select channel, Esc to exit')
+        ui.statusBox.setContent('Discord Inbox - ↑↓ mouse scroll · → select channel · Esc exit')
         ui.screen.render()
       }
     })
@@ -1118,7 +1166,7 @@ async function main() {
         // Reset status after 5 seconds if still in channel-select mode
         setTimeout(() => {
           if (currentMode === 'channel-select') {
-            ui.statusBox.setContent('Discord Inbox - ↑↓ to navigate, → to select channel, Esc to exit')
+            ui.statusBox.setContent('Discord Inbox - ↑↓ mouse scroll · → select channel · Esc exit')
             ui.screen.render()
           }
         }, 5000)

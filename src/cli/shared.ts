@@ -52,6 +52,25 @@ export const getStringWidth = (text: string): number => {
   return stringWidth(text)
 }
 
+const ELLIPSIS = '…'
+const ELLIPSIS_WIDTH = stringWidth(ELLIPSIS)
+
+/**
+ * Truncate text to fit within maxWidth (in terminal columns).
+ * Emoji and other wide chars count as 2. Appends … when truncated.
+ */
+export function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth < ELLIPSIS_WIDTH) return ''
+  const w = stringWidth(text)
+  if (w <= maxWidth) return text
+  let prefix = ''
+  for (const c of text) {
+    if (stringWidth(prefix + c) + ELLIPSIS_WIDTH > maxWidth) break
+    prefix += c
+  }
+  return prefix + ELLIPSIS
+}
+
 // ==================== Interfaces ====================
 
 export interface ChannelInfo {
@@ -547,6 +566,7 @@ export const createUIComponents = (title: string): UIComponents => {
     smartCSR: true,
     fullUnicode: true,
     title,
+    mouse: true,
   })
 
   const statusBox = blessed.box({

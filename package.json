@@ -10,6 +10,7 @@
     "pretty": "prettier --check src",
     "lint": "npm run pretty && eslint --max-warnings 0 --ext ts,tsx,json src",
     "check-token": "npm run build-ts && node dist/scripts/checkToken.js",
+    "build:cli-esm": "node scripts/build-cli-esm.mjs",
     "post": "npm run build-ts && node dist/cli/postMessage.js",
     "inbox": "npm run build-ts && node dist/cli/inbox.js"
   },
@@ -30,7 +31,6 @@
   "devDependencies": {
     "@types/blessed": "^0.1.27",
     "@types/express": "^4.17.15",
-    "@types/ink": "^0.5.2",
     "@types/node": "^18.11.18",
     "@types/react": "^19.2.9",
     "@typescript-eslint/eslint-plugin": "^5.47.0",
@@ -55,11 +55,15 @@
   },
   "dependencies": {
     "@discordjs/rest": "^1.5.0",
+    "@inkjs/ui": "^2.0.0",
+    "@zenobius/ink-mouse": "^1.0.3",
     "discord.js": "^14.7.1",
     "dotenv": "^16.0.3",
     "envalid": "^7.3.1",
     "express": "^4.18.2",
+    "ink": "^6.6.0",
     "node-emoji": "^2.2.0",
+    "react": "^19.2.3",
     "string-width": "^8.1.0"
   },
   "_moduleAliases": {

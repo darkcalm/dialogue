@@ -107,6 +107,7 @@ async function main() {
       smartCSR: true,
       fullUnicode: true,
       title: 'Discord Bot CLI',
+      mouse: true,
     })
 
     let selectedChannelIndex = 0
@@ -269,6 +270,7 @@ async function main() {
       content: '',
       scrollable: true,
       alwaysScroll: true,
+      mouse: true,
       scrollbar: {
         ch: ' ',
       },
@@ -530,6 +532,54 @@ async function main() {
         messageScrollIndex++
         }
         updateMessagesDisplay()
+      }
+    })
+
+    // Mouse wheel scroll: channel list and messages (same as ↑↓)
+    const scrollMessagesUp = () => {
+      if (currentMode === 'messages' && recentMessages.length > 0) {
+        if (selectedMessageIndex === -1) {
+          selectedMessageIndex = Math.min(messageScrollIndex + 9, recentMessages.length - 1)
+        } else if (selectedMessageIndex > 0) {
+          selectedMessageIndex--
+          if (selectedMessageIndex < messageScrollIndex) {
+            messageScrollIndex = selectedMessageIndex
+          }
+        } else if (messageScrollIndex > 0) {
+          messageScrollIndex--
+        }
+        updateMessagesDisplay()
+        screen.render()
+      }
+    }
+    const scrollMessagesDown = () => {
+      if (currentMode === 'messages' && recentMessages.length > 0) {
+        if (selectedMessageIndex === -1) {
+          selectedMessageIndex = messageScrollIndex
+        } else if (selectedMessageIndex < recentMessages.length - 1) {
+          selectedMessageIndex++
+          if (selectedMessageIndex >= messageScrollIndex + 10) {
+            messageScrollIndex = selectedMessageIndex - 9
+          }
+        } else if (messageScrollIndex < recentMessages.length - 1) {
+          messageScrollIndex++
+        }
+        updateMessagesDisplay()
+        screen.render()
+      }
+    }
+    messagesBox.on('wheelup', scrollMessagesUp)
+    messagesBox.on('wheeldown', scrollMessagesDown)
+    channelListBox.on('wheelup', () => {
+      if (currentMode === 'channel-select') {
+        ;(channelListBox as blessed.Widgets.ListElement).up(1)
+        screen.render()
+      }
+    })
+    channelListBox.on('wheeldown', () => {
+      if (currentMode === 'channel-select') {
+        ;(channelListBox as blessed.Widgets.ListElement).down(1)
+        screen.render()
       }
     })
 
