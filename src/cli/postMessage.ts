@@ -15,7 +15,7 @@ import * as https from 'https'
 import * as http from 'http'
 import { exec } from 'child_process'
 import { promisify } from 'util'
-import { emojify, getEmoji, loadOlderMessages, MessageInfo as SharedMessageInfo } from './shared'
+import { emojify, getEmoji, loadOlderMessages, formatMentions, MessageInfo as SharedMessageInfo } from './shared'
 import config from '@/helpers/env'
 
 const execAsync = promisify(exec)
@@ -191,12 +191,14 @@ async function main() {
                 if (referencedMsg) {
                   const refAuthorName = referencedMsg.author.displayName || referencedMsg.author.username
                   const refBotTag = referencedMsg.author.bot ? ' [BOT]' : ''
-                  const refContent = emojify(referencedMsg.content || '(no text content)')
+                  let refContent = emojify(referencedMsg.content || '(no text content)')
+                  // Replace Discord mentions with readable @username format
+                  refContent = formatMentions(refContent, referencedMsg)
                   // Truncate to 50 chars for preview
-                  const contentPreview = refContent.length > 50 
-                    ? refContent.substring(0, 50) + '...' 
+                  const contentPreview = refContent.length > 50
+                    ? refContent.substring(0, 50) + '...'
                     : refContent
-                  
+
                   replyTo = {
                     author: `${refAuthorName}${refBotTag}`,
                     content: contentPreview.replace(/\n/g, ' '), // Replace newlines with spaces
@@ -209,8 +211,10 @@ async function main() {
             
             const messageDate = new Date(msg.createdTimestamp)
             // Convert emoji shortcodes to Unicode in message content
-            const processedContent = emojify(msg.content || '(no text content)')
-            
+            let processedContent = emojify(msg.content || '(no text content)')
+            // Replace Discord mentions with readable @username format
+            processedContent = formatMentions(processedContent, msg)
+
             result.push({
               id: msg.id,
               author: `${authorName}${botTag}`,

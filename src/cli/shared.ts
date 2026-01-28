@@ -158,6 +158,36 @@ export const markChannelVisited = (channelId: string, lastMessageId?: string): v
   saveVisitData(data)
 }
 
+// ==================== Mention Formatting ====================
+
+/**
+ * Replace Discord mention format (<@userid> or <@!userid>) with readable @username
+ */
+export const formatMentions = (content: string, message: Message): string => {
+  let formattedContent = content
+
+  // Replace user mentions with @username
+  const mentionRegex = /<@!?(\d+)>/g
+  formattedContent = formattedContent.replace(mentionRegex, (match, userId) => {
+    // Try to find the user in the message's mentions
+    const user = message.mentions.users.get(userId)
+    if (user) {
+      return `@${user.displayName || user.username}`
+    }
+    // If not found, try the guild members (if in a guild)
+    if (message.guild) {
+      const member = message.guild.members.cache.get(userId)
+      if (member) {
+        return `@${member.displayName || member.user.username}`
+      }
+    }
+    // Fallback to original mention if user can't be resolved
+    return match
+  })
+
+  return formattedContent
+}
+
 // ==================== Message Loading ====================
 
 export const loadMessages = async (
@@ -224,12 +254,14 @@ export const loadMessages = async (
             if (referencedMsg) {
               const refAuthorName = referencedMsg.author.displayName || referencedMsg.author.username
               const refBotTag = referencedMsg.author.bot ? ' [BOT]' : ''
-              const refContent = emojify(referencedMsg.content || '(no text content)')
+              let refContent = emojify(referencedMsg.content || '(no text content)')
+              // Replace Discord mentions with readable @username format
+              refContent = formatMentions(refContent, referencedMsg)
               // Truncate to 50 chars for preview
-              const contentPreview = refContent.length > 50 
-                ? refContent.substring(0, 50) + '...' 
+              const contentPreview = refContent.length > 50
+                ? refContent.substring(0, 50) + '...'
                 : refContent
-              
+
               replyTo = {
                 author: `${refAuthorName}${refBotTag}`,
                 content: contentPreview.replace(/\n/g, ' '), // Replace newlines with spaces
@@ -242,8 +274,10 @@ export const loadMessages = async (
         
         const messageDate = new Date(msg.createdTimestamp)
         // Convert emoji shortcodes to Unicode in message content
-        const processedContent = emojify(msg.content || '(no text content)')
-        
+        let processedContent = emojify(msg.content || '(no text content)')
+        // Replace Discord mentions with readable @username format
+        processedContent = formatMentions(processedContent, msg)
+
         result.push({
           id: msg.id,
           author: `${authorName}${botTag}`,
@@ -337,11 +371,13 @@ export const loadOlderMessages = async (
             if (referencedMsg) {
               const refAuthorName = referencedMsg.author.displayName || referencedMsg.author.username
               const refBotTag = referencedMsg.author.bot ? ' [BOT]' : ''
-              const refContent = emojify(referencedMsg.content || '(no text content)')
-              const contentPreview = refContent.length > 50 
-                ? refContent.substring(0, 50) + '...' 
+              let refContent = emojify(referencedMsg.content || '(no text content)')
+              // Replace Discord mentions with readable @username format
+              refContent = formatMentions(refContent, referencedMsg)
+              const contentPreview = refContent.length > 50
+                ? refContent.substring(0, 50) + '...'
                 : refContent
-              
+
               replyTo = {
                 author: `${refAuthorName}${refBotTag}`,
                 content: contentPreview.replace(/\n/g, ' '),
@@ -353,8 +389,10 @@ export const loadOlderMessages = async (
         }
         
         const messageDate = new Date(msg.createdTimestamp)
-        const processedContent = emojify(msg.content || '(no text content)')
-        
+        let processedContent = emojify(msg.content || '(no text content)')
+        // Replace Discord mentions with readable @username format
+        processedContent = formatMentions(processedContent, msg)
+
         newMessages.push({
           id: msg.id,
           author: `${authorName}${botTag}`,
