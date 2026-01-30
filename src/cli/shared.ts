@@ -95,7 +95,7 @@ export interface MessageInfo {
   isBot: boolean
   hasAttachments: boolean
   attachmentCount: number
-  reactions: Array<{ emoji: string; count: number; name: string }>
+  reactions: Array<{ emoji: string; count: number; name: string; users: string[] }>
   replyTo?: ReplyInfo // Information about the message being replied to
 }
 
@@ -218,9 +218,9 @@ export const loadMessages = async (
         const hasAttachments = msg.attachments.size > 0
         const attachmentCount = msg.attachments.size
         
-        const reactions: Array<{ emoji: string; count: number; name: string }> = []
+        const reactions: Array<{ emoji: string; count: number; name: string; users: string[] }> = []
         if (msg.reactions.cache.size > 0) {
-          msg.reactions.cache.forEach(reaction => {
+          for (const reaction of msg.reactions.cache.values()) {
             let emojiDisplay: string
             let emojiName: string
             
@@ -231,12 +231,25 @@ export const loadMessages = async (
               emojiName = reaction.emoji.name || reaction.emoji.toString()
               emojiDisplay = reaction.emoji.toString()
             }
+            
+            // Fetch users who reacted
+            const users: string[] = []
+            try {
+              const reactionUsers = await reaction.users.fetch()
+              reactionUsers.forEach(user => {
+                users.push(user.displayName || user.username)
+              })
+            } catch {
+              // If fetching users fails, continue without user list
+            }
+            
             reactions.push({
               emoji: emojiDisplay,
               count: reaction.count,
               name: emojiName,
+              users,
             })
-          })
+          }
         }
         
         // Check if this message is a reply
@@ -338,9 +351,9 @@ export const loadOlderMessages = async (
         const hasAttachments = msg.attachments.size > 0
         const attachmentCount = msg.attachments.size
         
-        const reactions: Array<{ emoji: string; count: number; name: string }> = []
+        const reactions: Array<{ emoji: string; count: number; name: string; users: string[] }> = []
         if (msg.reactions.cache.size > 0) {
-          msg.reactions.cache.forEach(reaction => {
+          for (const reaction of msg.reactions.cache.values()) {
             let emojiDisplay: string
             let emojiName: string
             
@@ -351,12 +364,25 @@ export const loadOlderMessages = async (
               emojiName = reaction.emoji.name || reaction.emoji.toString()
               emojiDisplay = reaction.emoji.toString()
             }
+            
+            // Fetch users who reacted
+            const users: string[] = []
+            try {
+              const reactionUsers = await reaction.users.fetch()
+              reactionUsers.forEach(user => {
+                users.push(user.displayName || user.username)
+              })
+            } catch {
+              // If fetching users fails, continue without user list
+            }
+            
             reactions.push({
               emoji: emojiDisplay,
               count: reaction.count,
               name: emojiName,
+              users,
             })
-          })
+          }
         }
         
         let replyTo: ReplyInfo | undefined
@@ -710,6 +736,7 @@ export interface UIComponents {
   reactionInputBox: blessed.Widgets.TextboxElement
   llmPreviewBox: blessed.Widgets.BoxElement
   attachmentsBox: blessed.Widgets.BoxElement
+  reactionUsersBox: blessed.Widgets.BoxElement
 }
 
 export const createUIComponents = (title: string): UIComponents => {
@@ -727,8 +754,8 @@ export const createUIComponents = (title: string): UIComponents => {
     height: 1,
     content: `${title} - Loading...`,
     style: {
-      fg: 'white',
       bg: 'blue',
+      fg: 'white',
     },
   })
 
@@ -736,17 +763,15 @@ export const createUIComponents = (title: string): UIComponents => {
     top: 1,
     left: 0,
     width: '40%',
-    height: '90%',
-    border: { type: 'line' },
-    label: ' Channels ',
+    height: '100%',
     keys: true,
     vi: true,
     mouse: true,
-    scrollable: true,
-    alwaysScroll: true,
     style: {
-      selected: { bg: 'blue', fg: 'white' },
-      item: { fg: 'white' },
+      selected: {
+        bg: 'green',
+        fg: 'black',
+      },
     },
   })
 
@@ -754,16 +779,18 @@ export const createUIComponents = (title: string): UIComponents => {
     top: 1,
     left: '40%',
     width: '60%',
-    height: '77%',
-    border: { type: 'line' },
-    label: ' Messages ',
+    height: '76%',
+    content: '',
     scrollable: true,
     alwaysScroll: true,
     mouse: true,
-    keys: true,
-    vi: true,
+    scrollbar: {
+      ch: ' ',
+    },
     style: {
-      fg: 'white',
+      scrollbar: {
+        bg: 'blue',
+      },
     },
   })
 
@@ -802,14 +829,10 @@ export const createUIComponents = (title: string): UIComponents => {
     left: '40%',
     width: '60%',
     height: 3,
-    border: { type: 'line' },
-    label: ' Type message: ',
     inputOnFocus: true,
-    keys: true,
-    mouse: true,
-    hidden: false,
     style: {
       fg: 'white',
+      bg: 'blue',
     },
   })
 
@@ -818,14 +841,30 @@ export const createUIComponents = (title: string): UIComponents => {
     left: '40%',
     width: '60%',
     height: 3,
-    border: { type: 'line' },
-    label: ' Emoji (e.g., 🐙 or :octopus: or <:custom:id>): ',
     inputOnFocus: true,
-    keys: true,
+    hidden: true,
+    style: {
+      fg: 'yellow',
+      bg: 'blue',
+    },
+  })
+
+  const reactionUsersBox = blessed.box({
+    top: 'center',
+    left: 'center',
+    width: '50%',
+    height: '50%',
+    border: { type: 'line' },
+    label: ' Reaction Users ',
+    scrollable: true,
+    alwaysScroll: true,
     mouse: true,
+    keys: true,
     hidden: true,
     style: {
       fg: 'white',
+      bg: 'black',
+      border: { fg: 'cyan' },
     },
   })
 
@@ -838,5 +877,6 @@ export const createUIComponents = (title: string): UIComponents => {
     reactionInputBox,
     llmPreviewBox,
     attachmentsBox,
+    reactionUsersBox,
   }
 }

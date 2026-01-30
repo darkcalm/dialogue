@@ -419,7 +419,7 @@ async function main() {
       updateMessagesDisplay()
       currentMode = 'messages'
       ui.messagesBox.focus()
-      ui.statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, d=delete, r=reply, e=react, f=download, u=open URLs, i=send, ←=change channel`)
+      ui.statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, d=delete, r=reply, e=react, f=download, u=open URLs, v=view reactions, i=send, ←=change channel`)
       ui.screen.render()
     })
 
@@ -976,7 +976,7 @@ async function main() {
       ui.inputBox.show()
       currentMode = 'messages'
       ui.messagesBox.focus()
-      ui.statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, d=delete, r=reply, e=react, f=download, u=open URLs, i=send, ←=change channel`)
+      ui.statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, d=delete, r=reply, e=react, f=download, u=open URLs, v=view reactions, i=send, ←=change channel`)
       ui.screen.render()
     })
 
@@ -1036,6 +1036,35 @@ async function main() {
       }
     })
 
+    // View reaction users popup
+    ui.screen.key(['v', 'V'], () => {
+      if (currentMode === 'messages' && selectedMessageIndex >= 0 && selectedMessageIndex < recentMessages.length) {
+        const messageInfo = recentMessages[selectedMessageIndex]
+        if (messageInfo.reactions && messageInfo.reactions.length > 0) {
+          const content = messageInfo.reactions.map(r => {
+            const userList = r.users.length > 0 ? r.users.join(', ') : '(no users fetched)'
+            return `${r.emoji}  (${r.count})\n  ${userList}`
+          }).join('\n\n')
+          ui.reactionUsersBox.setContent(content)
+          ui.reactionUsersBox.show()
+          ui.reactionUsersBox.focus()
+          ui.statusBox.setContent('Reaction users - Press Esc to close')
+          ui.screen.render()
+        } else {
+          ui.statusBox.setContent('No reactions on this message')
+          ui.screen.render()
+        }
+      }
+    })
+
+    // Close reaction users popup
+    ui.reactionUsersBox.key(['escape', 'q'], () => {
+      ui.reactionUsersBox.hide()
+      ui.messagesBox.focus()
+      ui.statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, d=delete, r=reply, e=react, f=download, u=open URLs, v=view reactions, i=send, ←=change channel`)
+      ui.screen.render()
+    })
+
     ui.screen.key(['p', 'P'], async () => {
       if (currentMode === 'llm-review') {
         await sendCurrentMessage(llmProcessedText)
@@ -1089,7 +1118,7 @@ async function main() {
       llmOriginalText = ''
       llmProcessedText = ''
       ui.llmPreviewBox.hide()
-      ui.statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, d=delete, r=reply, e=react, f=download, u=open URLs, i=send, ←=change channel`)
+      ui.statusBox.setContent(`Channel: ${selectedChannel.guildName ? `${selectedChannel.guildName} / ` : ''}${selectedChannel.name} - ↑↓ to select message, d=delete, r=reply, e=react, f=download, u=open URLs, v=view reactions, i=send, ←=change channel`)
       ui.screen.render()
     })
 
@@ -1240,6 +1269,7 @@ async function main() {
     ui.screen.append(ui.attachmentsBox)
     ui.screen.append(ui.inputBox)
     ui.screen.append(ui.reactionInputBox)
+    ui.screen.append(ui.reactionUsersBox)
 
     ui.channelListBox.focus()
     ui.screen.render()

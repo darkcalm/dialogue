@@ -42,7 +42,7 @@ interface MessageInfo {
   isBot: boolean
   hasAttachments: boolean // Whether message has any attachments
   attachmentCount: number // Number of attachments
-  reactions: Array<{ emoji: string; count: number; name: string }> // Emoji reactions on the message
+  reactions: Array<{ emoji: string; count: number; name: string; users: string[] }> // Emoji reactions on the message
   replyTo?: ReplyInfo // Information about the message being replied to
 }
 
@@ -151,9 +151,9 @@ async function main() {
             const attachmentCount = msg.attachments.size
             
             // Fetch reactions
-            const reactions: Array<{ emoji: string; count: number; name: string }> = []
+            const reactions: Array<{ emoji: string; count: number; name: string; users: string[] }> = []
             if (msg.reactions.cache.size > 0) {
-              msg.reactions.cache.forEach(reaction => {
+              for (const reaction of msg.reactions.cache.values()) {
                 // Get emoji display - show name for better terminal compatibility
                 let emojiDisplay: string
                 let emojiName: string
@@ -168,12 +168,25 @@ async function main() {
                   emojiName = reaction.emoji.name || reaction.emoji.toString()
                   emojiDisplay = reaction.emoji.toString()
                 }
+                
+                // Fetch users who reacted
+                const users: string[] = []
+                try {
+                  const reactionUsers = await reaction.users.fetch()
+                  reactionUsers.forEach(user => {
+                    users.push(user.displayName || user.username)
+                  })
+                } catch {
+                  // If fetching users fails, continue without user list
+                }
+                
                 reactions.push({
                   emoji: emojiDisplay,
                   count: reaction.count,
                   name: emojiName,
+                  users,
                 })
-              })
+              }
             }
             
             // Check if this message is a reply
@@ -343,6 +356,26 @@ async function main() {
       style: {
         fg: 'yellow',
         bg: 'blue',
+      },
+    })
+
+    // Reaction users popup box
+    const reactionUsersBox = blessed.box({
+      top: 'center',
+      left: 'center',
+      width: '50%',
+      height: '50%',
+      border: { type: 'line' },
+      label: ' Reaction Users ',
+      scrollable: true,
+      alwaysScroll: true,
+      mouse: true,
+      keys: true,
+      hidden: true,
+      style: {
+        fg: 'white',
+        bg: 'black',
+        border: { fg: 'cyan' },
       },
     })
 
@@ -1422,6 +1455,35 @@ async function main() {
       }
     })
 
+    // View reaction users popup
+    screen.key(['v', 'V'], () => {
+      if (currentMode === 'messages' && selectedMessageIndex >= 0 && selectedMessageIndex < recentMessages.length) {
+        const messageInfo = recentMessages[selectedMessageIndex]
+        if (messageInfo.reactions && messageInfo.reactions.length > 0) {
+          const content = messageInfo.reactions.map(r => {
+            const userList = r.users.length > 0 ? r.users.join(', ') : '(no users fetched)'
+            return `${r.emoji}  (${r.count})\n  ${userList}`
+          }).join('\n\n')
+          reactionUsersBox.setContent(content)
+          reactionUsersBox.show()
+          reactionUsersBox.focus()
+          statusBox.setContent('Reaction users - Press Esc or q to close')
+          screen.render()
+        } else {
+          statusBox.setContent('No reactions on this message')
+          screen.render()
+        }
+      }
+    })
+
+    // Close reaction users popup
+    reactionUsersBox.key(['escape', 'q'], () => {
+      reactionUsersBox.hide()
+      messagesBox.focus()
+      statusBox.setContent('Message mode - ↑↓ navigate, r=reply, e=react, d=delete, f=download, u=URLs, v=view reactions, ←=channels')
+      screen.render()
+    })
+
     // LLM review actions - these must be checked before other handlers
     screen.key(['p', 'P'], async () => {
       if (currentMode === 'llm-review') {
@@ -1518,6 +1580,7 @@ async function main() {
     screen.append(attachmentsBox)
     screen.append(inputBox)
     screen.append(reactionInputBox)
+    screen.append(reactionUsersBox)
 
     screen.render()
   } catch (error) {
