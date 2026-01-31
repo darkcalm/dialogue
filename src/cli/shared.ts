@@ -3,7 +3,6 @@
  */
 
 import { Client, TextChannel, ThreadChannel, Message } from 'discord.js'
-import * as blessed from 'blessed'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -106,24 +105,7 @@ export interface ChannelVisitData {
   }
 }
 
-// ==================== State Management ====================
 
-export interface AppState {
-  client: Client
-  screen: blessed.Widgets.Screen
-  channelList: ChannelInfo[]
-  selectedChannelIndex: number
-  selectedChannel: ChannelInfo
-  recentMessages: MessageInfo[]
-  messageObjects: Map<string, Message>
-  messageScrollIndex: number
-  selectedMessageIndex: number
-  currentMode: 'channel-select' | 'messages' | 'input' | 'react-input' | 'llm-review'
-  replyingToMessage: Message | null
-  attachedFiles: Array<{ path: string; name: string }>
-  llmOriginalText: string
-  llmProcessedText: string
-}
 
 // ==================== Visit Tracking ====================
 
@@ -155,6 +137,12 @@ export const markChannelVisited = (channelId: string, lastMessageId?: string): v
     lastVisited: new Date().toISOString(),
     lastMessageId,
   }
+  saveVisitData(data)
+}
+
+export const removeChannelVisit = (channelId: string): void => {
+  const data = loadVisitData()
+  delete data[channelId]
   saveVisitData(data)
 }
 
@@ -725,158 +713,4 @@ export const resolveEmoji = async (
   return trimmed || null
 }
 
-// ==================== UI Components Factory ====================
 
-export interface UIComponents {
-  screen: blessed.Widgets.Screen
-  statusBox: blessed.Widgets.BoxElement
-  channelListBox: blessed.Widgets.ListElement
-  messagesBox: blessed.Widgets.BoxElement
-  inputBox: blessed.Widgets.TextboxElement
-  reactionInputBox: blessed.Widgets.TextboxElement
-  llmPreviewBox: blessed.Widgets.BoxElement
-  attachmentsBox: blessed.Widgets.BoxElement
-  reactionUsersBox: blessed.Widgets.BoxElement
-}
-
-export const createUIComponents = (title: string): UIComponents => {
-  const screen = blessed.screen({
-    smartCSR: true,
-    fullUnicode: true,
-    title,
-    mouse: true,
-  })
-
-  const statusBox = blessed.box({
-    top: 0,
-    left: 0,
-    width: '100%',
-    height: 1,
-    content: `${title} - Loading...`,
-    style: {
-      bg: 'blue',
-      fg: 'white',
-    },
-  })
-
-  const channelListBox = blessed.list({
-    top: 1,
-    left: 0,
-    width: '40%',
-    height: '100%',
-    keys: true,
-    vi: true,
-    mouse: true,
-    style: {
-      selected: {
-        bg: 'green',
-        fg: 'black',
-      },
-    },
-  })
-
-  const messagesBox = blessed.box({
-    top: 1,
-    left: '40%',
-    width: '60%',
-    height: '76%',
-    content: '',
-    scrollable: true,
-    alwaysScroll: true,
-    mouse: true,
-    scrollbar: {
-      ch: ' ',
-    },
-    style: {
-      scrollbar: {
-        bg: 'blue',
-      },
-    },
-  })
-
-  const llmPreviewBox = blessed.box({
-    top: '77%',
-    left: '40%',
-    width: '60%',
-    height: 4,
-    content: '',
-    hidden: true,
-    scrollable: true,
-    alwaysScroll: true,
-    style: {
-      fg: 'magenta',
-      bg: 'blue',
-    },
-  })
-
-  const attachmentsBox = blessed.box({
-    top: '85%',
-    left: '40%',
-    width: '60%',
-    height: 3,
-    content: '',
-    scrollable: true,
-    alwaysScroll: true,
-    hidden: true,
-    style: {
-      fg: 'cyan',
-      bg: 'blue',
-    },
-  })
-
-  const inputBox = blessed.textbox({
-    bottom: 0,
-    left: '40%',
-    width: '60%',
-    height: 3,
-    inputOnFocus: true,
-    style: {
-      fg: 'white',
-      bg: 'blue',
-    },
-  })
-
-  const reactionInputBox = blessed.textbox({
-    bottom: 0,
-    left: '40%',
-    width: '60%',
-    height: 3,
-    inputOnFocus: true,
-    hidden: true,
-    style: {
-      fg: 'yellow',
-      bg: 'blue',
-    },
-  })
-
-  const reactionUsersBox = blessed.box({
-    top: 'center',
-    left: 'center',
-    width: '50%',
-    height: '50%',
-    border: { type: 'line' },
-    label: ' Reaction Users ',
-    scrollable: true,
-    alwaysScroll: true,
-    mouse: true,
-    keys: true,
-    hidden: true,
-    style: {
-      fg: 'white',
-      bg: 'black',
-      border: { fg: 'cyan' },
-    },
-  })
-
-  return {
-    screen,
-    statusBox,
-    channelListBox,
-    messagesBox,
-    inputBox,
-    reactionInputBox,
-    llmPreviewBox,
-    attachmentsBox,
-    reactionUsersBox,
-  }
-}
