@@ -55,7 +55,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@discordjs/rest": "^1.5.0",
+    "@discordjs/rest": "^2.6.0",
     "@inkjs/ui": "^2.0.0",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "@zenobius/ink-mouse": "^1.0.3",
