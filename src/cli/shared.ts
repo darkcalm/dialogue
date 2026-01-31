@@ -14,6 +14,12 @@ import { emojify as emojifyNode, get as getEmojiNode, has as hasEmojiNode } from
 import stringWidth from 'string-width'
 import config from '@/helpers/env'
 import { IPlatformClient, IPlatformMessage, IPlatformChannel } from '@/platforms/types'
+import {
+  getCachedMessages,
+  setCachedMessages,
+  prependCachedMessages,
+  isCacheStale,
+} from './cache'
 
 const execAsync = promisify(exec)
 
@@ -85,6 +91,13 @@ export interface ReplyInfo {
   content: string // Truncated preview of the replied message
 }
 
+export interface AttachmentInfo {
+  id: string
+  name: string
+  url: string
+  size: number
+}
+
 export interface MessageInfo {
   id: string
   author: string
@@ -95,6 +108,7 @@ export interface MessageInfo {
   isBot: boolean
   hasAttachments: boolean
   attachmentCount: number
+  attachments: AttachmentInfo[]
   reactions: Array<{ emoji: string; count: number; name: string; users: string[] }>
   replyTo?: ReplyInfo // Information about the message being replied to
 }
@@ -113,6 +127,12 @@ export function platformMessageToMessageInfo(msg: IPlatformMessage): MessageInfo
     isBot: msg.isBot,
     hasAttachments: msg.attachments.length > 0,
     attachmentCount: msg.attachments.length,
+    attachments: msg.attachments.map(att => ({
+      id: att.id,
+      name: att.name,
+      url: att.url,
+      size: att.size,
+    })),
     reactions: msg.reactions,
     replyTo: msg.replyTo,
   }
@@ -205,42 +225,79 @@ export const formatMentions = (content: string, message: Message): string => {
 
 /**
  * Load messages from a channel using platform client
- * Platform-agnostic version that works with any IPlatformClient
+ * Uses cache-first strategy: returns cached messages immediately if available,
+ * fetches from network only if cache is missing or stale
  */
 export const loadMessagesFromPlatform = async (
   client: IPlatformClient,
   channelId: string,
-  limit: number = 20
+  limit: number = 20,
+  forceRefresh: boolean = false
 ): Promise<MessageInfo[]> => {
-  console.log(`🔍 loadMessagesFromPlatform called for channel: ${channelId}, limit: ${limit}`)
+  const platform = client.type
+
+  // Check cache first (unless force refresh)
+  if (!forceRefresh) {
+    const cached = getCachedMessages(platform, channelId)
+    if (cached && !isCacheStale(platform, channelId)) {
+      // Return most recent messages from cache
+      const cachedMessages = cached.messages.slice(-limit)
+      return cachedMessages
+    }
+  }
+
+  // Fetch from network
   try {
     const platformMessages = await client.getMessages(channelId, limit)
-    console.log(`📨 Received ${platformMessages.length} messages from platform client`)
     const result = platformMessages.map(platformMessageToMessageInfo)
-    console.log(`✅ Converted to ${result.length} MessageInfo objects`)
+
+    // Update cache
+    setCachedMessages(platform, channelId, result, result.length >= limit)
+
     return result
   } catch (error) {
     console.error('❌ Error loading messages:', error)
+
+    // Fall back to stale cache if available
+    const cached = getCachedMessages(platform, channelId)
+    if (cached) {
+      return cached.messages.slice(-limit)
+    }
+
     return []
   }
 }
 
 /**
  * Load older messages before a specific message ID
- * Platform-agnostic version that works with any IPlatformClient
+ * Uses cache and updates it with older messages
  */
 export const loadOlderMessagesFromPlatform = async (
   client: IPlatformClient,
   channelId: string,
   beforeMessageId: string,
   limit: number = 20
-): Promise<MessageInfo[]> => {
+): Promise<{ messages: MessageInfo[]; newCount: number; hasMore: boolean }> => {
+  const platform = client.type
+
   try {
     const platformMessages = await client.getMessagesBefore(channelId, beforeMessageId, limit)
-    return platformMessages.map(platformMessageToMessageInfo)
+    const newMessages = platformMessages.map(platformMessageToMessageInfo)
+    const hasMore = newMessages.length >= limit
+
+    // Update cache with older messages
+    const addedCount = prependCachedMessages(platform, channelId, newMessages, hasMore)
+
+    // Return the full cached message list for the channel
+    const cached = getCachedMessages(platform, channelId)
+    return {
+      messages: cached?.messages || newMessages,
+      newCount: addedCount,
+      hasMore,
+    }
   } catch (error) {
     console.error('Error loading older messages:', error)
-    return []
+    return { messages: [], newCount: 0, hasMore: false }
   }
 }
 
@@ -725,6 +782,72 @@ export const downloadAttachments = async (
 
   await Promise.all(downloadPromises)
   statusCallback(`✅ Downloaded ${message.attachments.size} file(s) to Downloads folder`)
+}
+
+/**
+ * Download attachments from a MessageInfo (platform-agnostic)
+ */
+export const downloadAttachmentsFromInfo = async (
+  attachments: AttachmentInfo[],
+  statusCallback: (msg: string) => void
+): Promise<void> => {
+  if (attachments.length === 0) {
+    statusCallback('❌ Message has no attachments')
+    return
+  }
+
+  const homeDir = os.homedir()
+  const downloadsPath = path.join(homeDir, 'Downloads')
+
+  if (!fs.existsSync(downloadsPath)) {
+    fs.mkdirSync(downloadsPath, { recursive: true })
+  }
+
+  statusCallback(`📥 Downloading ${attachments.length} file(s)...`)
+
+  const downloadPromises = attachments.map(async (attachment, index) => {
+    const url = attachment.url
+    const fileName = attachment.name || `attachment_${index + 1}`
+    const filePath = path.join(downloadsPath, fileName)
+
+    let finalPath = filePath
+    let counter = 1
+    while (fs.existsSync(finalPath)) {
+      const ext = path.extname(fileName)
+      const nameWithoutExt = path.basename(fileName, ext)
+      finalPath = path.join(downloadsPath, `${nameWithoutExt}_${counter}${ext}`)
+      counter++
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const protocol = url.startsWith('https') ? https : http
+      const file = fs.createWriteStream(finalPath)
+
+      protocol.get(url, (response) => {
+        if (response.statusCode === 301 || response.statusCode === 302) {
+          protocol.get(response.headers.location!, (redirectResponse) => {
+            redirectResponse.pipe(file)
+            file.on('finish', () => {
+              file.close()
+              resolve()
+            })
+          }).on('error', reject)
+        } else {
+          response.pipe(file)
+          file.on('finish', () => {
+            file.close()
+            resolve()
+          })
+        }
+      }).on('error', (err) => {
+        fs.unlink(finalPath, () => {}) // Clean up on error
+        reject(err)
+      })
+    })
+  })
+
+  await Promise.all(downloadPromises)
+  statusCallback(`✅ Downloaded ${attachments.length} file(s) to Downloads folder`)
 }
 
 // ==================== Emoji Resolution for Reactions ====================

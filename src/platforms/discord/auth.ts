@@ -26,8 +26,8 @@ export function createDiscordClient(): Client {
  */
 export async function connectDiscord(client: Client): Promise<void> {
   return new Promise((resolve, reject) => {
-    // Set up ready handler
-    client.once('ready', () => {
+    // Set up ready handler (clientReady in discord.js v15+)
+    client.once('clientReady', () => {
       resolve()
     })
 

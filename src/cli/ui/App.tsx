@@ -17,10 +17,11 @@ import {
   formatDateHeader,
   rewriteMessageWithLLM,
   attachFile,
-  downloadAttachments as downloadAttachmentsUtil,
+  downloadAttachmentsFromInfo,
   resolveEmoji,
   emojify,
 } from '../shared'
+import { upsertCachedMessage, deleteCachedMessage, getCachedMessages } from '../cache'
 
 // ==================== Types ====================
 
@@ -670,6 +671,50 @@ export function App({
     }
   }, [stdout])
 
+  // Subscribe to real-time message events and update cache + UI
+  useEffect(() => {
+    const platform = client.type
+
+    // Handle new messages
+    client.onMessage((msg) => {
+      upsertCachedMessage(platform, msg.channelId, msg)
+
+      // If we're viewing this channel, update UI state
+      if (state.selectedChannel?.id === msg.channelId && state.view === 'messages') {
+        const cached = getCachedMessages(platform, msg.channelId)
+        if (cached) {
+          dispatch({ type: 'SET_MESSAGES', messages: cached.messages })
+        }
+      }
+    })
+
+    // Handle message updates (edits, reactions)
+    client.onMessageUpdate((msg) => {
+      upsertCachedMessage(platform, msg.channelId, msg)
+
+      // If we're viewing this channel, update UI state
+      if (state.selectedChannel?.id === msg.channelId && state.view === 'messages') {
+        const cached = getCachedMessages(platform, msg.channelId)
+        if (cached) {
+          dispatch({ type: 'SET_MESSAGES', messages: cached.messages })
+        }
+      }
+    })
+
+    // Handle message deletions
+    client.onMessageDelete((channelId, messageId) => {
+      deleteCachedMessage(platform, channelId, messageId)
+
+      // If we're viewing this channel, update UI state
+      if (state.selectedChannel?.id === channelId && state.view === 'messages') {
+        const cached = getCachedMessages(platform, channelId)
+        if (cached) {
+          dispatch({ type: 'SET_MESSAGES', messages: cached.messages })
+        }
+      }
+    })
+  }, [client]) // Only register once per client
+
   // Refresh channel list (for inbox)
   const refreshChannels = useCallback(async () => {
     if (!onRefreshChannels) return
@@ -769,30 +814,28 @@ export function App({
     dispatch({ type: 'SET_STATUS', text: 'Loading older messages...' })
 
     const oldestId = state.messages[0].id
-    const prevLength = state.messages.length
 
     try {
-      const olderMessages = await loadOlderMessagesFromPlatform(
+      const { messages, newCount, hasMore } = await loadOlderMessagesFromPlatform(
         client,
         state.selectedChannel!.id,
         oldestId,
         20
       )
 
-      const newMessages = [...olderMessages, ...state.messages]
-      const addedCount = olderMessages.length
-      if (addedCount === 0) {
+      if (newCount === 0) {
         dispatch({ type: 'SET_HAS_MORE_OLDER', hasMore: false })
         dispatch({ type: 'SET_STATUS', text: 'No more older messages' })
       } else {
         dispatch({
           type: 'PREPEND_MESSAGES',
-          messages: newMessages,
-          count: addedCount,
+          messages,
+          count: newCount,
         })
+        dispatch({ type: 'SET_HAS_MORE_OLDER', hasMore })
         dispatch({
           type: 'SET_STATUS',
-          text: `Loaded ${addedCount} older messages`,
+          text: `Loaded ${newCount} older messages`,
         })
       }
     } catch (err) {
@@ -980,14 +1023,23 @@ export function App({
 
     const msgInfo = state.messages[state.selectedMessageIndex]
 
-    if (!msgInfo.hasAttachments) {
+    if (!msgInfo.hasAttachments || msgInfo.attachments.length === 0) {
       dispatch({ type: 'SET_STATUS', text: 'No attachments on this message' })
       return
     }
 
-    // TODO: Implement platform-agnostic attachment download
-    // For now, this feature is temporarily disabled during refactoring
-    dispatch({ type: 'SET_STATUS', text: '⚠️  Attachment download temporarily disabled' })
+    dispatch({ type: 'SET_LOADING', loading: true })
+    try {
+      await downloadAttachmentsFromInfo(msgInfo.attachments, (status) => {
+        dispatch({ type: 'SET_STATUS', text: status })
+      })
+    } catch (err) {
+      dispatch({
+        type: 'SET_STATUS',
+        text: `❌ Download failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+      })
+    }
+    dispatch({ type: 'SET_LOADING', loading: false })
   }, [state])
 
   // View reaction users

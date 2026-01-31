@@ -4,16 +4,18 @@
  * Uses Ink for interactive terminal UI with 1-column layout
  */
 
-import { Client, GatewayIntentBits, TextChannel, ThreadChannel } from 'discord.js'
+import { Client, GatewayIntentBits, TextChannel, ThreadChannel, Message } from 'discord.js'
 import {
   ChannelInfo,
   loadVisitData,
   removeChannelVisit,
+  platformMessageToMessageInfo,
 } from './shared'
 import { renderApp } from './ui/App'
 import { showPlatformSelector } from './ui/showPlatformSelector'
 import { PlatformType, IPlatformClient } from '@/platforms/types'
 import { createPlatformClient } from '@/platforms/factory'
+import { getCachedMessages, setCachedMessages, createChannelKey } from './cache'
 import config from '@/helpers/env'
 
 interface InboxChannelInfo extends ChannelInfo {
@@ -128,6 +130,101 @@ async function buildWhatsAppInbox(platformClient: IPlatformClient): Promise<{
   return { channels: channelList, displayItems, displayIndexToChannelIndex }
 }
 
+// Process a single channel for inbox grouping
+async function processChannelForInbox(
+  channel: TextChannel | ThreadChannel,
+  guildName: string,
+  botUserId: string,
+  visitData: Record<string, any>
+): Promise<InboxChannelInfo | null> {
+  const channelInfo: InboxChannelInfo = {
+    id: channel.id,
+    name: channel.name,
+    type: channel.isThread() ? 'thread' : 'text',
+    guildName,
+    group: 'visited',
+  }
+
+  const channelVisit = visitData[channel.id]
+
+  try {
+    // Check cache first for fast inbox refresh
+    const cached = getCachedMessages('discord', channel.id)
+
+    if (cached && cached.messages.length > 0) {
+      const newestMsg = cached.messages[cached.messages.length - 1]
+      channelInfo.lastMessageTimestamp = newestMsg.date
+
+      const cacheAgeMs = Date.now() - cached.fetchedAt
+      if (cacheAgeMs < 300_000) { // 5 min cache for inbox
+        if (!channelVisit) {
+          channelInfo.group = 'unvisited'
+          channelInfo.newMessageCount = cached.messages.length
+        } else {
+          const lastVisitDate = new Date(channelVisit.lastVisited)
+          const newMessages = cached.messages.filter(msg =>
+            msg.date > lastVisitDate && msg.authorId !== botUserId
+          )
+          if (newMessages.length > 0) {
+            channelInfo.group = 'new'
+            channelInfo.newMessageCount = newMessages.length
+          } else {
+            channelInfo.group = 'visited'
+          }
+        }
+        return channelInfo
+      }
+    }
+
+    // Cache miss or stale - fetch from Discord (only 5 messages for speed)
+    const messages = await channel.messages.fetch({ limit: 5 })
+    const messagesArray = Array.from(messages.values())
+
+    if (messagesArray.length > 0) {
+      channelInfo.lastMessageTimestamp = new Date(messagesArray[0].createdTimestamp)
+    }
+
+    const mentionMessages = messagesArray.filter(msg =>
+      msg.mentions.users.has(botUserId) ||
+      msg.content.includes(`<@${botUserId}>`) ||
+      msg.content.includes(`<@!${botUserId}>`)
+    )
+
+    if (!channelVisit) {
+      channelInfo.group = 'unvisited'
+      channelInfo.newMessageCount = messagesArray.length
+      if (mentionMessages.length > 0) {
+        channelInfo.group = 'mentions'
+        channelInfo.mentionCount = mentionMessages.length
+      }
+    } else {
+      const lastVisitDate = new Date(channelVisit.lastVisited)
+      const newMessages = messagesArray.filter(msg =>
+        new Date(msg.createdTimestamp) > lastVisitDate && msg.author.id !== botUserId
+      )
+      const newMentions = mentionMessages.filter(msg =>
+        new Date(msg.createdTimestamp) > lastVisitDate
+      )
+
+      if (newMentions.length > 0) {
+        channelInfo.group = 'mentions'
+        channelInfo.mentionCount = newMentions.length
+      } else if (newMessages.length > 0) {
+        channelInfo.group = 'new'
+        channelInfo.newMessageCount = newMessages.length
+      } else {
+        channelInfo.group = 'visited'
+      }
+    }
+    return channelInfo
+  } catch (err) {
+    if (!channelVisit) {
+      channelInfo.group = 'unvisited'
+    }
+    return channelInfo
+  }
+}
+
 // Build channel list and display items (reusable for refresh)
 async function buildInboxChannels(client: Client, hideUnvisited: boolean = true): Promise<{
   channels: InboxChannelInfo[]
@@ -135,13 +232,16 @@ async function buildInboxChannels(client: Client, hideUnvisited: boolean = true)
   displayIndexToChannelIndex: Map<number, number>
 }> {
   const visitData = loadVisitData()
-  const botUserId = client.user?.id
+  const botUserId = client.user?.id || ''
 
   const mentionChannels: InboxChannelInfo[] = []
   const newMessageChannels: InboxChannelInfo[] = []
   const unvisitedChannels: InboxChannelInfo[] = []
   const visitedChannels: InboxChannelInfo[] = []
-  
+
+  // Collect all channels to process
+  const channelsToProcess: Array<{ channel: TextChannel | ThreadChannel; guildName: string }> = []
+
   for (const [guildId, guild] of client.guilds.cache) {
     for (const [channelId, channel] of guild.channels.cache) {
       if (channel.isTextBased() && (channel instanceof TextChannel || channel instanceof ThreadChannel)) {
@@ -149,81 +249,28 @@ async function buildInboxChannels(client: Client, hideUnvisited: boolean = true)
         if (!permissions?.has('ViewChannel') || !permissions?.has('SendMessages')) {
           continue
         }
-        
-        const channelInfo: InboxChannelInfo = {
-          id: channel.id,
-          name: channel.name,
-          type: channel.isThread() ? 'thread' : 'text',
-          guildName: guild.name,
-          group: 'visited',
-        }
+        channelsToProcess.push({ channel, guildName: guild.name })
+      }
+    }
+  }
 
-        const channelVisit = visitData[channel.id]
-        
-        try {
-          const messages = await channel.messages.fetch({ limit: 50 })
-          const messagesArray = Array.from(messages.values())
-          
-          if (messagesArray.length > 0) {
-            channelInfo.lastMessageTimestamp = new Date(messagesArray[0].createdTimestamp)
-          }
+  // Process channels in parallel batches (10 concurrent)
+  const BATCH_SIZE = 10
+  for (let i = 0; i < channelsToProcess.length; i += BATCH_SIZE) {
+    const batch = channelsToProcess.slice(i, i + BATCH_SIZE)
+    const results = await Promise.all(
+      batch.map(({ channel, guildName }) =>
+        processChannelForInbox(channel, guildName, botUserId, visitData)
+      )
+    )
 
-          const mentionMessages = messagesArray.filter(msg => 
-            msg.mentions.users.has(botUserId!) || 
-            msg.content.includes(`<@${botUserId}>`) ||
-            msg.content.includes(`<@!${botUserId}>`)
-          )
-          
-          if (!channelVisit) {
-            channelInfo.group = 'unvisited'
-            channelInfo.newMessageCount = messagesArray.length
-            
-            if (mentionMessages.length > 0) {
-              channelInfo.group = 'mentions'
-              channelInfo.mentionCount = mentionMessages.length
-            }
-          } else {
-            const lastVisitDate = new Date(channelVisit.lastVisited)
-            
-            const newMessages = messagesArray.filter(msg => 
-              new Date(msg.createdTimestamp) > lastVisitDate &&
-              msg.author.id !== botUserId
-            )
-            
-            const newMentions = mentionMessages.filter(msg =>
-              new Date(msg.createdTimestamp) > lastVisitDate
-            )
-            
-            if (newMentions.length > 0) {
-              channelInfo.group = 'mentions'
-              channelInfo.mentionCount = newMentions.length
-            } else if (newMessages.length > 0) {
-              channelInfo.group = 'new'
-              channelInfo.newMessageCount = newMessages.length
-            } else {
-              channelInfo.group = 'visited'
-            }
-          }
-        } catch (err) {
-          if (!channelVisit) {
-            channelInfo.group = 'unvisited'
-          }
-        }
-
-        switch (channelInfo.group) {
-          case 'mentions':
-            mentionChannels.push(channelInfo)
-            break
-          case 'new':
-            newMessageChannels.push(channelInfo)
-            break
-          case 'unvisited':
-            unvisitedChannels.push(channelInfo)
-            break
-          case 'visited':
-            visitedChannels.push(channelInfo)
-            break
-        }
+    for (const channelInfo of results) {
+      if (!channelInfo) continue
+      switch (channelInfo.group) {
+        case 'mentions': mentionChannels.push(channelInfo); break
+        case 'new': newMessageChannels.push(channelInfo); break
+        case 'unvisited': unvisitedChannels.push(channelInfo); break
+        case 'visited': visitedChannels.push(channelInfo); break
       }
     }
   }
@@ -328,7 +375,7 @@ async function main() {
     
     if (inboxData.channels.length === 0) {
       console.log('❌ No accessible channels found')
-      await client.destroy()
+      await platformClient.disconnect()
       process.exit(0)
     }
 
