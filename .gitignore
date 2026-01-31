@@ -53,3 +53,9 @@ coverage/
 *.tmp
 *.temp
 .cache/
+
+# WhatsApp session data (contains credentials)
+whatsapp-session/
+
+# Visit tracking data (contains channel IDs)
+.discord-cli-visits.json

@@ -5,12 +5,12 @@
 
 import React, { useReducer, useCallback, useEffect, useState } from 'react'
 import { render, Box, Text, useApp, useInput, useStdout } from 'ink'
-import { Client, Message, TextChannel, ThreadChannel } from 'discord.js'
+import { IPlatformClient } from '@/platforms/types'
 import {
   ChannelInfo,
   MessageInfo,
-  loadMessages as loadMessagesFromChannel,
-  loadOlderMessages,
+  loadMessagesFromPlatform,
+  loadOlderMessagesFromPlatform,
   markChannelVisited,
   extractUrls,
   openUrlInBrowser,
@@ -40,7 +40,6 @@ export interface AppState {
   selectedChannel: ChannelInfo | null
 
   messages: MessageInfo[]
-  messageObjects: Map<string, Message>
   selectedMessageIndex: number
   messageScrollIndex: number
   hasMoreOlderMessages: boolean
@@ -71,7 +70,6 @@ type Action =
   | {
       type: 'SET_MESSAGES'
       messages: MessageInfo[]
-      messageObjects: Map<string, Message>
     }
   | { type: 'PREPEND_MESSAGES'; messages: MessageInfo[]; count: number }
   | { type: 'SELECT_MESSAGE_INDEX'; index: number }
@@ -121,7 +119,6 @@ function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         messages: action.messages,
-        messageObjects: action.messageObjects,
         messageScrollIndex: Math.max(0, action.messages.length - 5),
         selectedMessageIndex:
           action.messages.length > 0 ? action.messages.length - 1 : -1,
@@ -592,7 +589,7 @@ function HelpBar({ bindings }: HelpBarProps) {
 // ==================== Main App ====================
 
 export interface AppProps {
-  client: Client
+  client: IPlatformClient
   initialChannels: ChannelInfo[]
   initialDisplayItems?: string[]
   title: string
@@ -637,7 +634,6 @@ export function App({
     selectedChannelIndex: 0,
     selectedChannel: initialChannels[0] || null,
     messages: [],
-    messageObjects: new Map(),
     selectedMessageIndex: -1,
     messageScrollIndex: 0,
     hasMoreOlderMessages: true,
@@ -736,13 +732,11 @@ export function App({
         text: `Loading messages from ${channel.name}...`,
       })
       try {
-        const messageObjects = new Map<string, Message>()
-        const messages = await loadMessagesFromChannel(
+        const messages = await loadMessagesFromPlatform(
           client,
-          channel,
-          messageObjects
+          channel.id
         )
-        dispatch({ type: 'SET_MESSAGES', messages, messageObjects })
+        dispatch({ type: 'SET_MESSAGES', messages })
         dispatch({
           type: 'SET_STATUS',
           text: `${channel.guildName ? `${channel.guildName} / ` : ''}${
@@ -778,16 +772,15 @@ export function App({
     const prevLength = state.messages.length
 
     try {
-      const newMessages = await loadOlderMessages(
+      const olderMessages = await loadOlderMessagesFromPlatform(
         client,
-        state.selectedChannel!,
+        state.selectedChannel!.id,
         oldestId,
-        state.messageObjects,
-        state.messages,
         20
       )
 
-      const addedCount = newMessages.length - prevLength
+      const newMessages = [...olderMessages, ...state.messages]
+      const addedCount = olderMessages.length
       if (addedCount === 0) {
         dispatch({ type: 'SET_HAS_MORE_OLDER', hasMore: false })
         dispatch({ type: 'SET_STATUS', text: 'No more older messages' })
@@ -821,67 +814,62 @@ export function App({
       dispatch({ type: 'SET_STATUS', text: 'Sending message...' })
 
       try {
-        const channel = await client.channels.fetch(state.selectedChannel.id)
-        if (
-          channel &&
-          channel.isTextBased() &&
-          (channel instanceof TextChannel || channel instanceof ThreadChannel)
-        ) {
-          // Parse /attach commands
-          let messageText = text
-          const attachRegex = /\/attach\s+(\S+)/g
-          const attachments: string[] = []
-          let match
-          while ((match = attachRegex.exec(text)) !== null) {
-            attachments.push(match[1])
-            messageText = messageText.replace(match[0], '').trim()
-          }
-
-          // Check for LLM rewrite
-          if (
-            messageText.startsWith('llm://') ||
-            messageText.endsWith(':\\\\llm')
-          ) {
-            const cleanText = messageText
-              .replace(/^llm:\/\//, '')
-              .replace(/:\\\\llm$/, '')
-              .trim()
-            const processed = await rewriteMessageWithLLM(cleanText)
-            dispatch({ type: 'SET_LLM_TEXTS', original: cleanText, processed })
-            dispatch({ type: 'SET_VIEW', view: 'llmReview' })
-            dispatch({
-              type: 'SET_STATUS',
-              text: 'LLM Review - p=processed o=original e=edit Esc=cancel',
-            })
-            dispatch({ type: 'SET_LOADING', loading: false })
-            return
-          }
-
-          // Build message options
-          const options: any = { content: messageText || undefined }
-
-          // Add attachments
-          if (state.attachedFiles.length > 0 || attachments.length > 0) {
-            const files = [
-              ...state.attachedFiles.map((f) => f.path),
-              ...attachments,
-            ]
-            options.files = files
-          }
-
-          // Add reply reference
-          if (state.replyingToMessageId) {
-            options.reply = { messageReference: state.replyingToMessageId }
-          }
-
-          await channel.send(options)
-          dispatch({ type: 'RESET_MESSAGE_STATE' })
-          dispatch({ type: 'SET_VIEW', view: 'messages' })
-          dispatch({ type: 'SET_STATUS', text: '✅ Message sent!' })
-
-          // Reload messages
-          await loadMessages(state.selectedChannel)
+        // Parse /attach commands
+        let messageText = text
+        const attachRegex = /\/attach\s+(\S+)/g
+        const attachmentPaths: string[] = []
+        let match
+        while ((match = attachRegex.exec(text)) !== null) {
+          attachmentPaths.push(match[1])
+          messageText = messageText.replace(match[0], '').trim()
         }
+
+        // Check for LLM rewrite
+        if (
+          messageText.startsWith('llm://') ||
+          messageText.endsWith(':\\\\llm')
+        ) {
+          const cleanText = messageText
+            .replace(/^llm:\/\//, '')
+            .replace(/:\\\\llm$/, '')
+            .trim()
+          const processed = await rewriteMessageWithLLM(cleanText)
+          dispatch({ type: 'SET_LLM_TEXTS', original: cleanText, processed })
+          dispatch({ type: 'SET_VIEW', view: 'llmReview' })
+          dispatch({
+            type: 'SET_STATUS',
+            text: 'LLM Review - p=processed o=original e=edit Esc=cancel',
+          })
+          dispatch({ type: 'SET_LOADING', loading: false })
+          return
+        }
+
+        // Build attachments array
+        const attachments: Array<{ path: string; name: string }> = []
+        for (const file of state.attachedFiles) {
+          attachments.push(file)
+        }
+        for (const filePath of attachmentPaths) {
+          attachments.push({
+            path: filePath,
+            name: filePath.split('/').pop() || 'attachment',
+          })
+        }
+
+        // Send message via platform client
+        await client.sendMessage({
+          content: messageText,
+          channelId: state.selectedChannel.id,
+          replyToMessageId: state.replyingToMessageId || undefined,
+          attachments: attachments.length > 0 ? attachments : undefined,
+        })
+
+        dispatch({ type: 'RESET_MESSAGE_STATE' })
+        dispatch({ type: 'SET_VIEW', view: 'messages' })
+        dispatch({ type: 'SET_STATUS', text: '✅ Message sent!' })
+
+        // Reload messages
+        await loadMessages(state.selectedChannel)
       } catch (err) {
         dispatch({
           type: 'SET_STATUS',
@@ -905,14 +893,14 @@ export function App({
     if (state.selectedMessageIndex < 0 || !state.selectedChannel) return
 
     const msgInfo = state.messages[state.selectedMessageIndex]
-    const msg = state.messageObjects.get(msgInfo.id)
+    const currentUser = client.getCurrentUser()
 
-    if (!msg) {
-      dispatch({ type: 'SET_STATUS', text: '❌ Message not found' })
+    if (!currentUser) {
+      dispatch({ type: 'SET_STATUS', text: '❌ User not found' })
       return
     }
 
-    if (msg.author.id !== client.user?.id) {
+    if (msgInfo.authorId !== currentUser.id) {
       dispatch({
         type: 'SET_STATUS',
         text: '❌ Can only delete your own messages',
@@ -921,7 +909,7 @@ export function App({
     }
 
     try {
-      await msg.delete()
+      await client.deleteMessage(state.selectedChannel.id, msgInfo.id)
       dispatch({ type: 'SET_STATUS', text: '✅ Message deleted' })
       await loadMessages(state.selectedChannel)
     } catch (err) {
@@ -938,30 +926,26 @@ export function App({
       if (state.selectedMessageIndex < 0 || !state.selectedChannel) return
 
       const msgInfo = state.messages[state.selectedMessageIndex]
-      const msg = state.messageObjects.get(msgInfo.id)
-
-      if (!msg) {
-        dispatch({ type: 'SET_STATUS', text: '❌ Message not found' })
-        return
-      }
 
       try {
-        const channel = await client.channels.fetch(state.selectedChannel.id)
-        if (
-          channel &&
-          (channel instanceof TextChannel || channel instanceof ThreadChannel)
-        ) {
-          const resolved = await resolveEmoji(emoji, channel)
-          if (!resolved) {
-            dispatch({ type: 'SET_STATUS', text: `❌ Unknown emoji: ${emoji}` })
-            return
+        // Try to resolve emoji for Discord (use native client for platform-specific logic)
+        let resolvedEmoji = emoji
+        if (client.type === 'discord') {
+          const nativeClient = client.getNativeClient()
+          const channel = await nativeClient.channels.fetch(state.selectedChannel.id)
+          if (channel) {
+            const resolved = await resolveEmoji(emoji, channel)
+            if (resolved) {
+              resolvedEmoji = resolved
+            }
           }
-          await msg.react(resolved)
-          dispatch({ type: 'SET_STATUS', text: '✅ Reaction added!' })
-          dispatch({ type: 'SET_VIEW', view: 'messages' })
-          dispatch({ type: 'SET_INPUT_TEXT', text: '' })
-          await loadMessages(state.selectedChannel)
         }
+
+        await client.addReaction(state.selectedChannel.id, msgInfo.id, resolvedEmoji)
+        dispatch({ type: 'SET_STATUS', text: '✅ Reaction added!' })
+        dispatch({ type: 'SET_VIEW', view: 'messages' })
+        dispatch({ type: 'SET_INPUT_TEXT', text: '' })
+        await loadMessages(state.selectedChannel)
       } catch (err) {
         dispatch({
           type: 'SET_STATUS',
@@ -995,16 +979,15 @@ export function App({
     if (state.selectedMessageIndex < 0) return
 
     const msgInfo = state.messages[state.selectedMessageIndex]
-    const msg = state.messageObjects.get(msgInfo.id)
 
-    if (!msg || msg.attachments.size === 0) {
+    if (!msgInfo.hasAttachments) {
       dispatch({ type: 'SET_STATUS', text: 'No attachments on this message' })
       return
     }
 
-    await downloadAttachmentsUtil(msg, (status) => {
-      dispatch({ type: 'SET_STATUS', text: status })
-    })
+    // TODO: Implement platform-agnostic attachment download
+    // For now, this feature is temporarily disabled during refactoring
+    dispatch({ type: 'SET_STATUS', text: '⚠️  Attachment download temporarily disabled' })
   }, [state])
 
   // View reaction users
@@ -1087,7 +1070,7 @@ export function App({
             index: state.channels.indexOf(channel),
           })
           onChannelSelect?.(channel)
-          markChannelVisited(channel.id)
+          markChannelVisited(channel.id, undefined, client.type)
           await loadMessages(channel)
           dispatch({ type: 'SET_VIEW', view: 'messages' })
         }
@@ -1232,11 +1215,7 @@ export function App({
         })
         return
       }
-      if (key.return) {
-        await sendMessage(state.inputText)
-        return
-      }
-      // Let TextInput handle other keys
+      // Let TextInput handle return key via onSubmit
     }
 
     // ==================== React View ====================

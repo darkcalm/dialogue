@@ -13,6 +13,7 @@ import { promisify } from 'util'
 import { emojify as emojifyNode, get as getEmojiNode, has as hasEmojiNode } from 'node-emoji'
 import stringWidth from 'string-width'
 import config from '@/helpers/env'
+import { IPlatformClient, IPlatformMessage, IPlatformChannel } from '@/platforms/types'
 
 const execAsync = promisify(exec)
 
@@ -98,6 +99,25 @@ export interface MessageInfo {
   replyTo?: ReplyInfo // Information about the message being replied to
 }
 
+/**
+ * Convert IPlatformMessage to MessageInfo for UI display
+ */
+export function platformMessageToMessageInfo(msg: IPlatformMessage): MessageInfo {
+  return {
+    id: msg.id,
+    author: msg.author,
+    authorId: msg.authorId,
+    content: msg.content,
+    timestamp: msg.timestamp,
+    date: msg.date,
+    isBot: msg.isBot,
+    hasAttachments: msg.attachments.length > 0,
+    attachmentCount: msg.attachments.length,
+    reactions: msg.reactions,
+    replyTo: msg.replyTo,
+  }
+}
+
 export interface ChannelVisitData {
   [channelId: string]: {
     lastVisited: string // ISO date string
@@ -131,17 +151,22 @@ export const saveVisitData = (data: ChannelVisitData): void => {
   }
 }
 
-export const markChannelVisited = (channelId: string, lastMessageId?: string): void => {
+export const markChannelVisited = (channelId: string, lastMessageId?: string, platform?: string): void => {
   const data = loadVisitData()
-  data[channelId] = {
+  // Use platform-prefixed key if platform provided
+  const key = platform ? `${platform}:${channelId}` : channelId
+  data[key] = {
     lastVisited: new Date().toISOString(),
     lastMessageId,
   }
   saveVisitData(data)
 }
 
-export const removeChannelVisit = (channelId: string): void => {
+export const removeChannelVisit = (channelId: string, platform?: string): void => {
   const data = loadVisitData()
+  const key = platform ? `${platform}:${channelId}` : channelId
+  delete data[key]
+  // Also try to delete unprefixed key for backwards compatibility
   delete data[channelId]
   saveVisitData(data)
 }
@@ -176,7 +201,50 @@ export const formatMentions = (content: string, message: Message): string => {
   return formattedContent
 }
 
-// ==================== Message Loading ====================
+// ==================== Message Loading (Platform-Agnostic) ====================
+
+/**
+ * Load messages from a channel using platform client
+ * Platform-agnostic version that works with any IPlatformClient
+ */
+export const loadMessagesFromPlatform = async (
+  client: IPlatformClient,
+  channelId: string,
+  limit: number = 20
+): Promise<MessageInfo[]> => {
+  console.log(`🔍 loadMessagesFromPlatform called for channel: ${channelId}, limit: ${limit}`)
+  try {
+    const platformMessages = await client.getMessages(channelId, limit)
+    console.log(`📨 Received ${platformMessages.length} messages from platform client`)
+    const result = platformMessages.map(platformMessageToMessageInfo)
+    console.log(`✅ Converted to ${result.length} MessageInfo objects`)
+    return result
+  } catch (error) {
+    console.error('❌ Error loading messages:', error)
+    return []
+  }
+}
+
+/**
+ * Load older messages before a specific message ID
+ * Platform-agnostic version that works with any IPlatformClient
+ */
+export const loadOlderMessagesFromPlatform = async (
+  client: IPlatformClient,
+  channelId: string,
+  beforeMessageId: string,
+  limit: number = 20
+): Promise<MessageInfo[]> => {
+  try {
+    const platformMessages = await client.getMessagesBefore(channelId, beforeMessageId, limit)
+    return platformMessages.map(platformMessageToMessageInfo)
+  } catch (error) {
+    console.error('Error loading older messages:', error)
+    return []
+  }
+}
+
+// ==================== Message Loading (Discord-Specific - Legacy) ====================
 
 export const loadMessages = async (
   client: Client,

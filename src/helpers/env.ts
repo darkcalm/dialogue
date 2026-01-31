@@ -1,5 +1,5 @@
 import * as dotenv from 'dotenv'
-import { cleanEnv, str } from 'envalid'
+import { cleanEnv, str, num } from 'envalid'
 import { cwd } from 'process'
 import { resolve } from 'path'
 
@@ -12,4 +12,6 @@ export default cleanEnv(process.env, {
   GUILD_ID: str({ default: '' }), // Optional: if not provided, commands deploy globally
   OPENROUTER_API_KEY: str({ default: '' }), // Optional: for LLM message rewriting
   OPENROUTER_MODEL: str({ default: '' }), // Optional: e.g. openrouter/your-model-name
+  WHATSAPP_SESSION_PATH: str({ default: './whatsapp-session' }), // WhatsApp session storage
+  WHATSAPP_AUTH_TIMEOUT: num({ default: 60000 }), // WhatsApp QR auth timeout (ms)
 })

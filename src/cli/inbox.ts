@@ -11,6 +11,9 @@ import {
   removeChannelVisit,
 } from './shared'
 import { renderApp } from './ui/App'
+import { showPlatformSelector } from './ui/showPlatformSelector'
+import { PlatformType, IPlatformClient } from '@/platforms/types'
+import { createPlatformClient } from '@/platforms/factory'
 import config from '@/helpers/env'
 
 interface InboxChannelInfo extends ChannelInfo {
@@ -18,6 +21,111 @@ interface InboxChannelInfo extends ChannelInfo {
   mentionCount?: number
   newMessageCount?: number
   lastMessageTimestamp?: Date
+}
+
+// Build WhatsApp inbox with grouping
+async function buildWhatsAppInbox(platformClient: IPlatformClient): Promise<{
+  channels: InboxChannelInfo[]
+  displayItems: string[]
+  displayIndexToChannelIndex: Map<number, number>
+}> {
+  const visitData = loadVisitData()
+  const channels = await platformClient.getChannels()
+
+  const newMessageChannels: InboxChannelInfo[] = []
+  const unvisitedChannels: InboxChannelInfo[] = []
+  const visitedChannels: InboxChannelInfo[] = []
+
+  for (const channel of channels) {
+    // Get chat metadata for last message info
+    const chatMetadata = channel.metadata?.nativeChat as any
+    const unreadCount = chatMetadata?.unreadCount || 0
+    const lastMessageTimestamp = chatMetadata?.conversationTimestamp
+      ? new Date(chatMetadata.conversationTimestamp * 1000)
+      : undefined
+
+    const channelInfo: InboxChannelInfo = {
+      ...channel,
+      group: 'visited',
+      lastMessageTimestamp,
+    }
+
+    // Check visit data (use platform-prefixed key)
+    const visitKey = `whatsapp:${channel.id}`
+    const channelVisit = visitData[visitKey] || visitData[channel.id] // fallback to old format
+
+    if (!channelVisit) {
+      // Never visited
+      channelInfo.group = 'unvisited'
+      if (unreadCount > 0) {
+        channelInfo.newMessageCount = unreadCount
+      }
+    } else {
+      // Check for new messages since last visit
+      const lastVisitDate = new Date(channelVisit.lastVisited)
+
+      if (unreadCount > 0 || (lastMessageTimestamp && lastMessageTimestamp > lastVisitDate)) {
+        channelInfo.group = 'new'
+        channelInfo.newMessageCount = unreadCount || 1
+      } else {
+        channelInfo.group = 'visited'
+      }
+    }
+
+    // Categorize
+    switch (channelInfo.group) {
+      case 'new':
+        newMessageChannels.push(channelInfo)
+        break
+      case 'unvisited':
+        unvisitedChannels.push(channelInfo)
+        break
+      case 'visited':
+        visitedChannels.push(channelInfo)
+        break
+    }
+  }
+
+  // Sort by timestamp (most recent first)
+  const sortByTimestamp = (a: InboxChannelInfo, b: InboxChannelInfo) => {
+    if (!a.lastMessageTimestamp && !b.lastMessageTimestamp) return 0
+    if (!a.lastMessageTimestamp) return 1
+    if (!b.lastMessageTimestamp) return -1
+    return b.lastMessageTimestamp.getTime() - a.lastMessageTimestamp.getTime()
+  }
+
+  newMessageChannels.sort(sortByTimestamp)
+  unvisitedChannels.sort(sortByTimestamp)
+  visitedChannels.sort(sortByTimestamp)
+
+  // Build display list
+  const displayItems: string[] = []
+  const channelList: InboxChannelInfo[] = []
+  const displayIndexToChannelIndex: Map<number, number> = new Map()
+  let channelIndex = 0
+
+  if (newMessageChannels.length > 0) {
+    displayItems.push(`══════ 🆕 NEW MESSAGES (${newMessageChannels.length}) ══════`)
+    newMessageChannels.forEach(ch => {
+      const badge = ch.newMessageCount ? ` [${ch.newMessageCount} new]` : ''
+      displayItems.push(`${ch.name}${badge}`)
+      displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
+      channelList.push(ch)
+      channelIndex++
+    })
+  }
+
+  if (visitedChannels.length > 0) {
+    displayItems.push(`══════ ✓ UP TO DATE (${visitedChannels.length}) ══════`)
+    visitedChannels.forEach(ch => {
+      displayItems.push(ch.name)
+      displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
+      channelList.push(ch)
+      channelIndex++
+    })
+  }
+
+  return { channels: channelList, displayItems, displayIndexToChannelIndex }
 }
 
 // Build channel list and display items (reusable for refresh)
@@ -185,31 +293,38 @@ async function buildInboxChannels(client: Client, hideUnvisited: boolean = true)
 
 async function main() {
   try {
-    console.log('🔌 Connecting to Discord...')
-    
-    const client = new Client({
-      intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-      ],
-    })
+    // Show platform selector
+    const selectedPlatform = await showPlatformSelector()
 
-    await client.login(config.DISCORD_BOT_TOKEN)
+    if (!selectedPlatform) {
+      console.log('❌ No platform selected')
+      process.exit(0)
+    }
 
-    await new Promise((resolve) => {
-      if (client.isReady()) {
-        resolve(undefined)
-      } else {
-        client.once('clientReady', resolve)
-      }
-    })
+    console.log(`🔌 Connecting to ${selectedPlatform}...`)
+
+    // Create platform client
+    const platformClient = await createPlatformClient(selectedPlatform)
+    await platformClient.connect()
 
     console.log('✅ Connected!')
     console.log('📥 Scanning channels for inbox...')
 
-    // Build initial channel list
-    let inboxData = await buildInboxChannels(client)
+    // Build initial channel list based on platform
+    let inboxData: {
+      channels: InboxChannelInfo[]
+      displayItems: string[]
+      displayIndexToChannelIndex: Map<number, number>
+    }
+
+    if (selectedPlatform === 'discord') {
+      // Get native Discord client for inbox scanning (temporary - will be refactored)
+      const client = platformClient.getNativeClient() as Client
+      inboxData = await buildInboxChannels(client)
+    } else {
+      // For WhatsApp, build grouped inbox
+      inboxData = await buildWhatsAppInbox(platformClient)
+    }
     
     if (inboxData.channels.length === 0) {
       console.log('❌ No accessible channels found')
@@ -229,33 +344,43 @@ async function main() {
 
     // Refresh callback - rebuilds channel list
     const onRefreshChannels = async () => {
-      inboxData = await buildInboxChannels(client)
+      if (selectedPlatform === 'discord') {
+        const client = platformClient.getNativeClient() as Client
+        inboxData = await buildInboxChannels(client)
+      } else {
+        inboxData = await buildWhatsAppInbox(platformClient)
+      }
       return { channels: inboxData.channels, displayItems: inboxData.displayItems }
     }
 
     // Unfollow callback - removes visit data and rebuilds
     const onUnfollowChannel = async (channel: ChannelInfo) => {
       removeChannelVisit(channel.id)
-      inboxData = await buildInboxChannels(client)
+      if (selectedPlatform === 'discord') {
+        const client = platformClient.getNativeClient() as Client
+        inboxData = await buildInboxChannels(client)
+      } else {
+        await onRefreshChannels()
+      }
       return { channels: inboxData.channels, displayItems: inboxData.displayItems }
     }
 
     // Render the Ink app
     const { waitUntilExit } = renderApp({
-      client,
+      client: platformClient,
       initialChannels: inboxData.channels,
       initialDisplayItems: inboxData.displayItems,
-      title: 'Discord Inbox',
+      title: `${selectedPlatform.charAt(0).toUpperCase() + selectedPlatform.slice(1)} Inbox`,
       getChannelFromDisplayIndex,
       onRefreshChannels,
       onUnfollowChannel,
       onExit: async () => {
-        await client.destroy()
+        await platformClient.disconnect()
       }
     })
 
     await waitUntilExit()
-    await client.destroy()
+    await platformClient.disconnect()
     process.exit(0)
   } catch (error) {
     console.error('❌ Error:', error instanceof Error ? error.message : 'Unknown error')
