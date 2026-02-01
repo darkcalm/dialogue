@@ -74,6 +74,10 @@ type Action =
       type: 'SET_MESSAGES'
       messages: MessageInfo[]
     }
+  | {
+      type: 'REFRESH_MESSAGES'
+      messages: MessageInfo[]
+    }
   | { type: 'PREPEND_MESSAGES'; messages: MessageInfo[]; count: number }
   | { type: 'SELECT_MESSAGE_INDEX'; index: number }
   | { type: 'SCROLL_MESSAGES'; delta: number }
@@ -128,6 +132,18 @@ function reducer(state: AppState, action: Action): AppState {
           action.messages.length > 0 ? action.messages.length - 1 : -1,
         hasMoreOlderMessages: true,
       }
+    case 'REFRESH_MESSAGES': {
+      // Preserve selected message index when refreshing after an action
+      const clampedIndex = Math.min(
+        state.selectedMessageIndex,
+        action.messages.length - 1
+      )
+      return {
+        ...state,
+        messages: action.messages,
+        selectedMessageIndex: clampedIndex >= 0 ? clampedIndex : action.messages.length - 1,
+      }
+    }
     case 'PREPEND_MESSAGES':
       return {
         ...state,
@@ -281,12 +297,19 @@ function SimpleTextInput({
 
   const displayValue = value || placeholder || ''
   const showPlaceholder = !value && placeholder
+  const charAtCursor = displayValue[cursorPos] || ' '
 
   return (
     <Text color={showPlaceholder ? 'gray' : 'white'}>
       {displayValue.slice(0, cursorPos)}
-      {focus && <Text color="cyan">▌</Text>}
-      {displayValue.slice(cursorPos)}
+      {focus ? (
+        <Text inverse color="cyan">
+          {charAtCursor}
+        </Text>
+      ) : (
+        charAtCursor !== ' ' && charAtCursor
+      )}
+      {displayValue.slice(cursorPos + (charAtCursor !== ' ' || focus ? 1 : 0))}
     </Text>
   )
 }
@@ -844,6 +867,19 @@ export function App({
     [client]
   )
 
+  // Refresh messages after an action (preserves selection)
+  const refreshMessages = useCallback(
+    async (channel: ChannelInfo) => {
+      try {
+        const messages = await loadMessagesFromPlatform(client, channel.id)
+        dispatch({ type: 'REFRESH_MESSAGES', messages })
+      } catch {
+        // Silently fail refresh - user already saw the action confirmation
+      }
+    },
+    [client]
+  )
+
   // Load older messages
   const loadOlder = useCallback(async () => {
     if (
@@ -997,14 +1033,14 @@ export function App({
     try {
       await client.deleteMessage(state.selectedChannel.id, msgInfo.id)
       dispatch({ type: 'SET_STATUS', text: '✅ Message deleted' })
-      await loadMessages(state.selectedChannel)
+      await refreshMessages(state.selectedChannel)
     } catch (err) {
       dispatch({
         type: 'SET_STATUS',
         text: `❌ Error: ${err instanceof Error ? err.message : 'Unknown'}`,
       })
     }
-  }, [client, state, loadMessages])
+  }, [client, state, refreshMessages])
 
   // Add reaction
   const addReaction = useCallback(
@@ -1031,7 +1067,7 @@ export function App({
         dispatch({ type: 'SET_STATUS', text: '✅ Reaction added!' })
         dispatch({ type: 'SET_VIEW', view: 'messages' })
         dispatch({ type: 'SET_INPUT_TEXT', text: '' })
-        await loadMessages(state.selectedChannel)
+        await refreshMessages(state.selectedChannel)
       } catch (err) {
         dispatch({
           type: 'SET_STATUS',
@@ -1039,7 +1075,7 @@ export function App({
         })
       }
     },
-    [client, state, loadMessages]
+    [client, state, refreshMessages]
   )
 
   // Open URLs from message
