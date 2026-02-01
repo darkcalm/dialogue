@@ -6,6 +6,7 @@
 import React, { useReducer, useCallback, useEffect, useState } from 'react'
 import { render, Box, Text, useApp, useInput, useStdout } from 'ink'
 import { IPlatformClient } from '@/platforms/types'
+import type { SectionName } from '../inbox'
 import {
   ChannelInfo,
   MessageInfo,
@@ -67,6 +68,7 @@ export interface AppState {
 type Action =
   | { type: 'SET_CHANNELS'; channels: ChannelInfo[]; displayItems?: string[] }
   | { type: 'SELECT_CHANNEL_INDEX'; index: number }
+  | { type: 'SET_SELECTED_CHANNEL'; channel: ChannelInfo | null }
   | { type: 'SET_VIEW'; view: ViewName }
   | {
       type: 'SET_MESSAGES'
@@ -107,12 +109,13 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         selectedChannelIndex: Math.max(
           0,
-          Math.min(action.index, state.channels.length - 1)
+          Math.min(action.index, state.channelDisplayItems.length - 1)
         ),
-        selectedChannel:
-          state.channels[
-            Math.max(0, Math.min(action.index, state.channels.length - 1))
-          ] || null,
+      }
+    case 'SET_SELECTED_CHANNEL':
+      return {
+        ...state,
+        selectedChannel: action.channel,
       }
     case 'SET_VIEW':
       return { ...state, view: action.view }
@@ -605,8 +608,14 @@ export interface AppProps {
     channels: ChannelInfo[]
     displayItems: string[]
   }>
+  onFollowChannel?: (
+    channel: ChannelInfo
+  ) => Promise<{ channels: ChannelInfo[]; displayItems: string[] }>
   onUnfollowChannel?: (
     channel: ChannelInfo
+  ) => Promise<{ channels: ChannelInfo[]; displayItems: string[] }>
+  onToggleSection?: (
+    section: SectionName
   ) => Promise<{ channels: ChannelInfo[]; displayItems: string[] }>
 }
 
@@ -619,7 +628,9 @@ export function App({
   getChannelFromDisplayIndex,
   onExit,
   onRefreshChannels,
+  onFollowChannel,
   onUnfollowChannel,
+  onToggleSection,
 }: AppProps) {
   const { exit } = useApp()
   const { stdout } = useStdout()
@@ -645,7 +656,7 @@ export function App({
     attachedFiles: [],
     llmOriginalText: '',
     llmProcessedText: '',
-    statusText: `${title} - ↑↓ navigate · Enter/→ select · Esc exit`,
+    statusText: `${title} - ↑↓ navigate · Enter select · Tab collapse · y follow · x unfollow`,
     loading: false,
     reactionUsersContent: '',
     rows: stdout?.rows || 24,
@@ -744,20 +755,24 @@ export function App({
     dispatch({ type: 'SET_LOADING', loading: false })
   }, [onRefreshChannels])
 
-  // Unfollow a channel (move to never visited)
-  const unfollowChannel = useCallback(async () => {
-    if (!onUnfollowChannel || !state.selectedChannel) return
+  // Follow a channel (add to following)
+  const followChannel = useCallback(async () => {
+    if (!onFollowChannel) return
+
+    const channel = getChannelFromDisplayIndex
+      ? getChannelFromDisplayIndex(state.selectedChannelIndex, state.channels)
+      : state.channels[state.selectedChannelIndex]
+
+    if (!channel) return
 
     dispatch({ type: 'SET_LOADING', loading: true })
-    dispatch({ type: 'SET_STATUS', text: 'Unfollowing channel...' })
+    dispatch({ type: 'SET_STATUS', text: 'Following channel...' })
     try {
-      const { channels, displayItems } = await onUnfollowChannel(
-        state.selectedChannel
-      )
+      const { channels, displayItems } = await onFollowChannel(channel)
       dispatch({ type: 'SET_CHANNELS', channels, displayItems })
       dispatch({
         type: 'SET_STATUS',
-        text: `✓ Unfollowed ${state.selectedChannel.name}`,
+        text: `✓ Following ${channel.name}`,
       })
     } catch (err) {
       dispatch({
@@ -766,7 +781,35 @@ export function App({
       })
     }
     dispatch({ type: 'SET_LOADING', loading: false })
-  }, [onUnfollowChannel, state.selectedChannel])
+  }, [onFollowChannel, getChannelFromDisplayIndex, state.selectedChannelIndex, state.channels])
+
+  // Unfollow a channel (move to unfollowed)
+  const unfollowChannel = useCallback(async () => {
+    if (!onUnfollowChannel) return
+
+    const channel = getChannelFromDisplayIndex
+      ? getChannelFromDisplayIndex(state.selectedChannelIndex, state.channels)
+      : state.channels[state.selectedChannelIndex]
+
+    if (!channel) return
+
+    dispatch({ type: 'SET_LOADING', loading: true })
+    dispatch({ type: 'SET_STATUS', text: 'Unfollowing channel...' })
+    try {
+      const { channels, displayItems } = await onUnfollowChannel(channel)
+      dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+      dispatch({
+        type: 'SET_STATUS',
+        text: `✓ Unfollowed ${channel.name}`,
+      })
+    } catch (err) {
+      dispatch({
+        type: 'SET_STATUS',
+        text: `❌ Error: ${err instanceof Error ? err.message : 'Unknown'}`,
+      })
+    }
+    dispatch({ type: 'SET_LOADING', loading: false })
+  }, [onUnfollowChannel, getChannelFromDisplayIndex, state.selectedChannelIndex, state.channels])
 
   // Load messages for selected channel
   const loadMessages = useCallback(
@@ -1077,31 +1120,17 @@ export function App({
 
     // ==================== Channels View ====================
     if (view === 'channels') {
-      // Navigation
+      // Navigation - allow selecting headers for collapsing
       if (key.upArrow || input === 'k') {
-        let newIndex = state.selectedChannelIndex - 1
-        // Skip headers
-        while (
-          newIndex >= 0 &&
-          state.channelDisplayItems[newIndex]?.startsWith('══════')
-        ) {
-          newIndex--
-        }
+        const newIndex = state.selectedChannelIndex - 1
         if (newIndex >= 0) {
           dispatch({ type: 'SELECT_CHANNEL_INDEX', index: newIndex })
         }
         return
       }
       if (key.downArrow || input === 'j') {
-        let newIndex = state.selectedChannelIndex + 1
-        // Skip headers
-        while (
-          newIndex < state.channelDisplayItems.length &&
-          state.channelDisplayItems[newIndex]?.startsWith('══════')
-        ) {
-          newIndex++
-        }
-        if (newIndex < state.channels.length) {
+        const newIndex = state.selectedChannelIndex + 1
+        if (newIndex < state.channelDisplayItems.length) {
           dispatch({ type: 'SELECT_CHANNEL_INDEX', index: newIndex })
         }
         return
@@ -1117,10 +1146,7 @@ export function App({
           : state.channels[state.selectedChannelIndex]
 
         if (channel) {
-          dispatch({
-            type: 'SELECT_CHANNEL_INDEX',
-            index: state.channels.indexOf(channel),
-          })
+          dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
           onChannelSelect?.(channel)
           markChannelVisited(channel.id, undefined, client.type)
           await loadMessages(channel)
@@ -1129,10 +1155,36 @@ export function App({
         return
       }
 
+      // Follow channel (y key)
+      if (input === 'y' && onFollowChannel) {
+        await followChannel()
+        return
+      }
+
       // Unfollow channel (x key)
       if (input === 'x' && onUnfollowChannel) {
         await unfollowChannel()
         return
+      }
+
+      // Toggle section collapse (Tab on header)
+      if (key.tab && onToggleSection) {
+        const currentItem = state.channelDisplayItems[state.selectedChannelIndex]
+        if (currentItem?.startsWith('══════')) {
+          // Extract section name from header
+          let section: SectionName | null = null
+          if (currentItem.includes('NEW')) section = 'new'
+          else if (currentItem.includes('FOLLOWING')) section = 'following'
+          else if (currentItem.includes('UNFOLLOWED')) section = 'unfollowed'
+
+          if (section) {
+            dispatch({ type: 'SET_LOADING', loading: true })
+            const { channels, displayItems } = await onToggleSection(section)
+            dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+            dispatch({ type: 'SET_LOADING', loading: false })
+            return
+          }
+        }
       }
 
       // Exit
@@ -1173,7 +1225,7 @@ export function App({
         dispatch({ type: 'SET_VIEW', view: 'channels' })
         dispatch({
           type: 'SET_STATUS',
-          text: `${title} - ↑↓ navigate · Enter/→ select · x=unfollow · Esc exit`,
+          text: `${title} - ↑↓ navigate · Enter select · Tab collapse · y follow · x unfollow`,
         })
         return
       }
@@ -1248,7 +1300,7 @@ export function App({
         dispatch({ type: 'SET_VIEW', view: 'channels' })
         dispatch({
           type: 'SET_STATUS',
-          text: `${title} - ↑↓ navigate · Enter/→ select · x=unfollow · Esc exit`,
+          text: `${title} - ↑↓ navigate · Enter select · Tab collapse · y follow · x unfollow`,
         })
         return
       }
