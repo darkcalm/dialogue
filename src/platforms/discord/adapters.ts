@@ -103,7 +103,7 @@ async function adaptDiscordReactions(message: Message): Promise<IReaction[]> {
       emoji,
       count: reaction.count || 0,
       name: emojiName,
-      users: users.map(u => u.id),
+      users: users.map(u => u.displayName || u.username),
     })
   }
 
