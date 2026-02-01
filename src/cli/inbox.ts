@@ -62,7 +62,27 @@ async function buildWhatsAppInbox(
     const channelVisit = visitData[visitKey] || visitData[channel.id] // fallback to old format
 
     if (!channelVisit) {
-      // Not following
+      // Check if user is mentioned in recent messages
+      const currentUser = platformClient.getCurrentUser()
+      if (currentUser && unreadCount > 0) {
+        try {
+          const messages = await platformClient.getMessages(channel.id, 5)
+          const hasMention = messages.some(
+            (msg) =>
+              msg.content.includes(`@${currentUser.username}`) ||
+              msg.content.includes(`@${currentUser.id}`)
+          )
+          if (hasMention) {
+            markChannelVisited(channel.id, undefined, 'whatsapp')
+            channelInfo.group = 'new'
+            channelInfo.newMessageCount = unreadCount
+            newMessageChannels.push(channelInfo)
+            continue
+          }
+        } catch {
+          // Ignore fetch errors
+        }
+      }
       channelInfo.group = 'unfollowed'
       if (unreadCount > 0) {
         channelInfo.newMessageCount = unreadCount
@@ -174,8 +194,23 @@ async function processChannelForInbox(
   const visitKey = `discord:${channel.id}`
   const channelVisit = visitData[visitKey] || visitData[channel.id]
 
-  // Skip message fetching for unfollowed channels
+  // For unfollowed channels, check if bot is mentioned
   if (!channelVisit) {
+    try {
+      const messages = await channel.messages.fetch({ limit: 5 })
+      const hasMention = Array.from(messages.values()).some(
+        (msg) => msg.mentions.users.has(botUserId)
+      )
+      if (hasMention) {
+        // Auto-follow if mentioned
+        markChannelVisited(channel.id, undefined, 'discord')
+        channelInfo.group = 'new'
+        channelInfo.newMessageCount = 1
+        return channelInfo
+      }
+    } catch {
+      // Ignore fetch errors
+    }
     channelInfo.group = 'unfollowed'
     return channelInfo
   }
