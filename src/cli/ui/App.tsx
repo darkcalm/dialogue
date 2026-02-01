@@ -936,9 +936,9 @@ export function App({
       dispatch({ type: 'SET_STATUS', text: 'Sending message...' })
 
       try {
-        // Parse /attach commands
+        // Parse /attach commands (supports escaped spaces like "file\ name.txt")
         let messageText = text
-        const attachRegex = /\/attach\s+(\S+)/g
+        const attachRegex = /\/attach\s+((?:\\\s|\S)+)/g
         const attachmentPaths: string[] = []
         let match
         while ((match = attachRegex.exec(text)) !== null) {
@@ -972,10 +972,7 @@ export function App({
           attachments.push(file)
         }
         for (const filePath of attachmentPaths) {
-          attachments.push({
-            path: filePath,
-            name: filePath.split('/').pop() || 'attachment',
-          })
+          attachFile(filePath, attachments)
         }
 
         // Send message via platform client

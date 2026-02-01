@@ -695,8 +695,8 @@ export const attachFile = (
       finalPath = finalPath.replace('~', os.homedir())
     }
     
-    // Unescape terminal drag-and-drop format
-    finalPath = finalPath.replace(/\\ /g, ' ')
+    // Unescape terminal drag-and-drop format (handles \space, \(, \), \', etc.)
+    finalPath = finalPath.replace(/\\(.)/g, '$1')
     
     finalPath = path.isAbsolute(finalPath) 
       ? path.normalize(finalPath)
