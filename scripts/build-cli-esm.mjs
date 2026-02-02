@@ -12,9 +12,9 @@ const root = join(__dirname, '..')
 
 const builds = [
   {
-    entry: join(root, 'src/cli/post.ts'),
-    outfile: join(root, 'dist-esm/post.mjs'),
-    name: 'post.mjs',
+    entry: join(root, 'src/cli/known.ts'),
+    outfile: join(root, 'dist-esm/known.mjs'),
+    name: 'known.mjs',
   },
   {
     entry: join(root, 'src/cli/inbox.ts'),

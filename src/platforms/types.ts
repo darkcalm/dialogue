@@ -190,6 +190,11 @@ export interface IPlatformClient {
    * Listen for message deletions
    */
   onMessageDelete(callback: (channelId: string, messageId: string) => void): void
+
+  /**
+   * Listen for new channel/chat creation
+   */
+  onChannelCreate?(callback: (channel: IPlatformChannel) => void): void
 }
 
 // ==================== Visit Tracking ====================

@@ -11,7 +11,7 @@
     "lint": "npm run pretty && eslint --max-warnings 0 --ext ts,tsx,json src",
     "check-token": "npm run build-ts && node dist/scripts/checkToken.js",
     "build:cli-esm": "node scripts/build-cli-esm.mjs",
-    "post": "npm run build:cli-esm && node dist-esm/post.mjs",
+    "known": "npm run build:cli-esm && node dist-esm/known.mjs",
     "inbox": "npm run build:cli-esm && node dist-esm/inbox.mjs"
   },
   "keywords": [

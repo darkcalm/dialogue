@@ -191,6 +191,73 @@ export const removeChannelVisit = (channelId: string, platform?: string): void =
   saveVisitData(data)
 }
 
+// ==================== Known Channels Tracking ====================
+
+const KNOWN_CHANNELS_PATH = path.join(os.homedir(), '.dialogue-known-channels.json')
+
+interface KnownChannelsData {
+  [platformChannelKey: string]: {
+    firstSeen: string
+    name: string
+  }
+}
+
+export const loadKnownChannels = (): KnownChannelsData => {
+  try {
+    if (fs.existsSync(KNOWN_CHANNELS_PATH)) {
+      const raw = fs.readFileSync(KNOWN_CHANNELS_PATH, 'utf-8')
+      return JSON.parse(raw)
+    }
+  } catch {
+    // Ignore errors, return empty
+  }
+  return {}
+}
+
+export const saveKnownChannels = (data: KnownChannelsData): void => {
+  try {
+    fs.writeFileSync(KNOWN_CHANNELS_PATH, JSON.stringify(data, null, 2))
+  } catch (err) {
+    console.error('Failed to save known channels:', err)
+  }
+}
+
+/**
+ * Check channels against known channels and auto-follow any new ones.
+ * Returns the list of newly discovered channel IDs.
+ */
+export const autoFollowNewChannels = (
+  channels: Array<{ id: string; name: string }>,
+  platform: string
+): string[] => {
+  const knownChannels = loadKnownChannels()
+  const visitData = loadVisitData()
+  const newChannelIds: string[] = []
+
+  for (const channel of channels) {
+    const knownKey = `${platform}:${channel.id}`
+    const visitKey = `${platform}:${channel.id}`
+
+    // If we've never seen this channel before
+    if (!knownChannels[knownKey]) {
+      // Mark it as known
+      knownChannels[knownKey] = {
+        firstSeen: new Date().toISOString(),
+        name: channel.name,
+      }
+
+      // Auto-follow if not already in visit data
+      if (!visitData[visitKey] && !visitData[channel.id]) {
+        markChannelVisited(channel.id, undefined, platform)
+        newChannelIds.push(channel.id)
+      }
+    }
+  }
+
+  saveKnownChannels(knownChannels)
+  return newChannelIds
+}
+
 // ==================== Mention Formatting ====================
 
 /**

@@ -33,6 +33,7 @@ export class WhatsAppPlatformClient implements IPlatformClient {
   private messageCallbacks: Array<(message: IPlatformMessage) => void> = []
   private messageUpdateCallbacks: Array<(message: IPlatformMessage) => void> = []
   private messageDeleteCallbacks: Array<(channelId: string, messageId: string) => void> = []
+  private channelCreateCallbacks: Array<(channel: IPlatformChannel) => void> = []
 
   // Store chats for quick access
   private chatsCache: Map<string, Chat> = new Map()
@@ -155,6 +156,20 @@ export class WhatsAppPlatformClient implements IPlatformClient {
           const existing = this.chatsCache.get(update.id)
           if (existing) {
             this.chatsCache.set(update.id, { ...existing, ...update })
+          }
+        }
+      })
+    })
+
+    // New chat/channel event
+    this.sock.ev.on('chats.upsert', (chats) => {
+      chats.forEach(chat => {
+        // Only fire callback for truly new chats not already in cache
+        if (!this.chatsCache.has(chat.id)) {
+          this.chatsCache.set(chat.id, chat)
+          if (this.channelCreateCallbacks.length > 0) {
+            const platformChannel = adaptWhatsAppChat(chat)
+            this.channelCreateCallbacks.forEach(cb => cb(platformChannel))
           }
         }
       })
@@ -596,5 +611,9 @@ export class WhatsAppPlatformClient implements IPlatformClient {
 
   onMessageDelete(callback: (channelId: string, messageId: string) => void): void {
     this.messageDeleteCallbacks.push(callback)
+  }
+
+  onChannelCreate(callback: (channel: IPlatformChannel) => void): void {
+    this.channelCreateCallbacks.push(callback)
   }
 }

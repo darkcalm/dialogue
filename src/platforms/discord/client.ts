@@ -28,6 +28,7 @@ export class DiscordPlatformClient implements IPlatformClient {
   private messageCallbacks: Array<(message: IPlatformMessage) => void> = []
   private messageUpdateCallbacks: Array<(message: IPlatformMessage) => void> = []
   private messageDeleteCallbacks: Array<(channelId: string, messageId: string) => void> = []
+  private channelCreateCallbacks: Array<(channel: IPlatformChannel) => void> = []
 
   constructor() {
     this.client = createDiscordClient()
@@ -59,6 +60,16 @@ export class DiscordPlatformClient implements IPlatformClient {
     this.client.on('messageDelete', (message) => {
       if (this.messageDeleteCallbacks.length > 0) {
         this.messageDeleteCallbacks.forEach(cb => cb(message.channelId, message.id))
+      }
+    })
+
+    // Channel create event
+    this.client.on('channelCreate', (channel) => {
+      if (this.channelCreateCallbacks.length > 0) {
+        if (channel instanceof TextChannel || channel instanceof ThreadChannel) {
+          const platformChannel = adaptDiscordChannel(channel)
+          this.channelCreateCallbacks.forEach(cb => cb(platformChannel))
+        }
       }
     })
   }
@@ -305,5 +316,9 @@ export class DiscordPlatformClient implements IPlatformClient {
 
   onMessageDelete(callback: (channelId: string, messageId: string) => void): void {
     this.messageDeleteCallbacks.push(callback)
+  }
+
+  onChannelCreate(callback: (channel: IPlatformChannel) => void): void {
+    this.channelCreateCallbacks.push(callback)
   }
 }

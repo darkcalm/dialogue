@@ -11,6 +11,7 @@ import {
   removeChannelVisit,
   markChannelVisited,
   platformMessageToMessageInfo,
+  autoFollowNewChannels,
 } from './shared'
 import { renderApp } from './ui/App'
 import { showPlatformSelector } from './ui/showPlatformSelector'
@@ -393,6 +394,16 @@ async function main() {
     console.log('✅ Connected!')
     console.log('📥 Scanning channels for inbox...')
 
+    // Auto-follow any new channels created while app was closed
+    const allChannels = await platformClient.getChannels()
+    const newlyFollowed = autoFollowNewChannels(
+      allChannels.map(ch => ({ id: ch.id, name: ch.name })),
+      selectedPlatform
+    )
+    if (newlyFollowed.length > 0) {
+      console.log(`📢 Auto-followed ${newlyFollowed.length} new channel(s)`)
+    }
+
     // Track collapsed sections - "unfollowed" collapsed by default
     const collapsedSections = new Set<SectionName>(['unfollowed'])
 
@@ -420,6 +431,14 @@ async function main() {
 
     console.log(`Found ${inboxData.channels.length} channels`)
     console.log('Starting UI...\n')
+
+    // Auto-follow new channels when they are created
+    if (platformClient.onChannelCreate) {
+      platformClient.onChannelCreate((channel) => {
+        console.log(`📢 New channel detected: ${channel.name} - auto-following...`)
+        markChannelVisited(channel.id, undefined, selectedPlatform)
+      })
+    }
 
     // Helper to get channel from display index (uses closure over current inboxData)
     const getChannelFromDisplayIndex = (displayIndex: number, channels: ChannelInfo[]): ChannelInfo | null => {
