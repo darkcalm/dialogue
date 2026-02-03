@@ -21,6 +21,11 @@ const builds = [
     outfile: join(root, 'dist-esm/inbox.mjs'),
     name: 'inbox.mjs',
   },
+  {
+    entry: join(root, 'src/cli/archive.ts'),
+    outfile: join(root, 'dist-esm/archive.mjs'),
+    name: 'archive.mjs',
+  },
 ]
 
 for (const { entry, outfile, name } of builds) {

@@ -1,12 +1,20 @@
 /**
  * CLI tool to view all tracked/persisted data
- * Shows known channels, visit data, and cache stats
+ * Shows known channels, visit data, cache stats, and message archive status
  */
 
 import {
   loadVisitData,
   loadKnownChannels,
 } from './shared'
+import {
+  initDB,
+  closeDB,
+  getTotalStats,
+  getChannelStats,
+  getDBPath,
+} from './db'
+import * as fs from 'fs'
 
 // Format relative time
 function formatRelativeTime(dateStr: string): string {
@@ -124,6 +132,59 @@ function main() {
   }
 
   console.log()
+
+  // Message Archive Stats
+  displayArchiveStats()
+}
+
+function displayArchiveStats(): void {
+  const dbPath = getDBPath()
+
+  // Check if database exists
+  if (!fs.existsSync(dbPath)) {
+    console.log('══════ Message Archive ══════')
+    console.log('  No messages archived yet.')
+    console.log('  Run "npm run archive" to start archiving messages.')
+    console.log()
+    return
+  }
+
+  try {
+    initDB()
+    const totalStats = getTotalStats()
+    const channelStats = getChannelStats()
+
+    console.log('══════ Message Archive ══════')
+    console.log(`  Database: ${dbPath}`)
+    console.log(`  Total messages: ${totalStats.totalMessages.toLocaleString()}`)
+    console.log(`  Channels archived: ${totalStats.totalChannels}`)
+
+    if (totalStats.oldestMessageDate) {
+      const oldest = new Date(totalStats.oldestMessageDate)
+      const newest = new Date(totalStats.newestMessageDate!)
+      console.log(`  Date range: ${oldest.toLocaleDateString()} - ${newest.toLocaleDateString()}`)
+    }
+
+    console.log(`  Backfill: ${totalStats.channelsComplete} complete, ${totalStats.channelsInProgress} in progress`)
+    console.log()
+
+    // Show per-channel breakdown if there are archived channels
+    if (channelStats.length > 0) {
+      console.log('══════ Archive by Channel ══════')
+      for (const ch of channelStats) {
+        const prefix = ch.guildName ? `[${ch.guildName}] ` : ''
+        const status = ch.backfillComplete ? '✓' : '...'
+        console.log(`  ${status} ${prefix}#${ch.name}: ${ch.messageCount.toLocaleString()} messages`)
+      }
+      console.log()
+    }
+
+    closeDB()
+  } catch (error) {
+    console.log('══════ Message Archive ══════')
+    console.log('  Error reading archive database.')
+    console.log()
+  }
 }
 
 main()

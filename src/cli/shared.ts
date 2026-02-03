@@ -262,28 +262,68 @@ export const autoFollowNewChannels = (
 
 /**
  * Replace Discord mention format (<@userid> or <@!userid>) with readable @username
+ * This is an async function that can fetch uncached users from the API
  */
-export const formatMentions = (content: string, message: Message): string => {
+export const formatMentions = async (content: string, message: Message): Promise<string> => {
+  const mentionRegex = /<@!?(\d+)>/g
+  const matches = [...content.matchAll(mentionRegex)]
+  
+  if (matches.length === 0) {
+    return content
+  }
+
   let formattedContent = content
 
-  // Replace user mentions with @username
-  const mentionRegex = /<@!?(\d+)>/g
-  formattedContent = formattedContent.replace(mentionRegex, (match, userId) => {
+  for (const match of matches) {
+    const fullMatch = match[0]
+    const userId = match[1]
+    let replacement: string | null = null
+
     // Try to find the user in the message's mentions
     const user = message.mentions.users.get(userId)
     if (user) {
-      return `@${user.displayName || user.username}`
+      replacement = `@${user.displayName || user.username}`
     }
-    // If not found, try the guild members (if in a guild)
-    if (message.guild) {
+    
+    // If not found, try the guild members cache
+    if (!replacement && message.guild) {
       const member = message.guild.members.cache.get(userId)
       if (member) {
-        return `@${member.displayName || member.user.username}`
+        replacement = `@${member.displayName || member.user.username}`
       }
     }
-    // Fallback to original mention if user can't be resolved
-    return match
-  })
+
+    // If still not found, try to fetch the member from the API
+    if (!replacement && message.guild) {
+      try {
+        const fetchedMember = await message.guild.members.fetch(userId)
+        if (fetchedMember) {
+          replacement = `@${fetchedMember.displayName || fetchedMember.user.username}`
+        }
+      } catch {
+        // Member fetch failed (user not in guild or API error)
+      }
+    }
+
+    // If still not found, try fetching the user directly from Discord client
+    if (!replacement && message.client) {
+      try {
+        const fetchedUser = await message.client.users.fetch(userId)
+        if (fetchedUser) {
+          replacement = `@${fetchedUser.displayName || fetchedUser.username}`
+        }
+      } catch {
+        // User fetch failed
+      }
+    }
+
+    // Final fallback: show @unknown-user instead of raw ID
+    if (!replacement) {
+      replacement = `@unknown-user`
+    }
+
+    formattedContent = formattedContent.replace(fullMatch, replacement)
+  }
 
   return formattedContent
 }
@@ -449,7 +489,7 @@ export const loadMessages = async (
               const refBotTag = referencedMsg.author.bot ? ' [BOT]' : ''
               let refContent = emojify(referencedMsg.content || '(no text content)')
               // Replace Discord mentions with readable @username format
-              refContent = formatMentions(refContent, referencedMsg)
+              refContent = await formatMentions(refContent, referencedMsg)
               // Truncate to 50 chars for preview
               const contentPreview = refContent.length > 50
                 ? refContent.substring(0, 50) + '...'
@@ -469,7 +509,7 @@ export const loadMessages = async (
         // Convert emoji shortcodes to Unicode in message content
         let processedContent = emojify(msg.content || '(no text content)')
         // Replace Discord mentions with readable @username format
-        processedContent = formatMentions(processedContent, msg)
+        processedContent = await formatMentions(processedContent, msg)
 
         result.push({
           id: msg.id,
@@ -579,7 +619,7 @@ export const loadOlderMessages = async (
               const refBotTag = referencedMsg.author.bot ? ' [BOT]' : ''
               let refContent = emojify(referencedMsg.content || '(no text content)')
               // Replace Discord mentions with readable @username format
-              refContent = formatMentions(refContent, referencedMsg)
+              refContent = await formatMentions(refContent, referencedMsg)
               const contentPreview = refContent.length > 50
                 ? refContent.substring(0, 50) + '...'
                 : refContent
@@ -597,7 +637,7 @@ export const loadOlderMessages = async (
         const messageDate = new Date(msg.createdTimestamp)
         let processedContent = emojify(msg.content || '(no text content)')
         // Replace Discord mentions with readable @username format
-        processedContent = formatMentions(processedContent, msg)
+        processedContent = await formatMentions(processedContent, msg)
 
         newMessages.push({
           id: msg.id,
