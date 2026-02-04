@@ -17,7 +17,9 @@ export interface IPlatformChannel {
   name: string
   type: 'text' | 'dm' | 'group' | 'thread'
   platform: PlatformType
+  parentId?: string // Guild ID for Discord, parent channel for threads
   parentName?: string // Guild name for Discord, null for WhatsApp
+  topic?: string // Channel topic/description
   metadata?: Record<string, any> // Platform-specific data
 }
 
@@ -56,6 +58,32 @@ export interface IReaction {
 }
 
 /**
+ * Embed in a message (link previews, rich embeds)
+ */
+export interface IEmbed {
+  type?: string
+  title?: string
+  description?: string
+  url?: string
+  color?: number
+  timestamp?: string
+  footer?: { text: string; iconUrl?: string }
+  image?: { url: string; width?: number; height?: number }
+  thumbnail?: { url: string; width?: number; height?: number }
+  author?: { name: string; url?: string; iconUrl?: string }
+  fields?: Array<{ name: string; value: string; inline?: boolean }>
+}
+
+/**
+ * Sticker in a message
+ */
+export interface ISticker {
+  id: string
+  name: string
+  formatType: number
+}
+
+/**
  * Platform-agnostic message representation
  */
 export interface IPlatformMessage {
@@ -65,11 +93,17 @@ export interface IPlatformMessage {
   authorId: string
   content: string
   timestamp: string // ISO 8601 format
+  editedTimestamp?: string // When message was last edited
   date: Date
   isBot: boolean
+  messageType?: string // Message type (e.g., DEFAULT, REPLY, THREAD_STARTER)
+  pinned?: boolean
   attachments: IAttachment[]
+  embeds: IEmbed[]
+  stickers: ISticker[]
   reactions: IReaction[]
   replyTo?: IMessageReference
+  threadId?: string // If message started a thread
   metadata?: Record<string, any> // Platform-specific data
 }
 

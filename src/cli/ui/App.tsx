@@ -23,6 +23,7 @@ import {
   emojify,
 } from '../shared'
 import { upsertCachedMessage, deleteCachedMessage, getCachedMessages } from '../cache'
+import { getMessagesFromArchive, MessageRecord } from '../db'
 
 // ==================== Types ====================
 
@@ -616,10 +617,12 @@ function HelpBar({ bindings }: HelpBarProps) {
 // ==================== Main App ====================
 
 export interface AppProps {
-  client: IPlatformClient
+  client: IPlatformClient | null
   initialChannels: ChannelInfo[]
   initialDisplayItems?: string[]
   title: string
+  /** If true, read messages from archive database instead of live API */
+  useArchiveForMessages?: boolean
   onChannelSelect?: (channel: ChannelInfo) => void
   getChannelFromDisplayIndex?: (
     index: number,
@@ -647,6 +650,7 @@ export function App({
   initialChannels,
   initialDisplayItems,
   title,
+  useArchiveForMessages = false,
   onChannelSelect,
   getChannelFromDisplayIndex,
   onExit,
@@ -707,6 +711,8 @@ export function App({
 
   // Subscribe to real-time message events and update cache + UI
   useEffect(() => {
+    if (!client) return // Archive-only mode - no real-time updates
+
     const platform = client.type
 
     // Handle new messages
@@ -835,6 +841,22 @@ export function App({
   }, [onUnfollowChannel, getChannelFromDisplayIndex, state.selectedChannelIndex, state.channels])
 
   // Load messages for selected channel
+  // Convert archive MessageRecord to MessageInfo
+  const archiveRecordToMessageInfo = (record: MessageRecord): MessageInfo => ({
+    id: record.id,
+    author: record.authorName,
+    authorId: record.authorId,
+    content: record.content,
+    timestamp: record.timestamp,
+    date: new Date(record.timestamp),
+    isBot: record.isBot,
+    hasAttachments: (record.attachments?.length || 0) > 0,
+    attachmentCount: record.attachments?.length || 0,
+    attachments: record.attachments || [],
+    reactions: record.reactions || [],
+    replyTo: record.replyToId ? { author: '', content: `(reply to ${record.replyToId})` } : undefined,
+  })
+
   const loadMessages = useCallback(
     async (channel: ChannelInfo) => {
       dispatch({ type: 'SET_LOADING', loading: true })
@@ -843,16 +865,25 @@ export function App({
         text: `Loading messages from ${channel.name}...`,
       })
       try {
-        const messages = await loadMessagesFromPlatform(
-          client,
-          channel.id
-        )
+        let messages: MessageInfo[]
+
+        if (useArchiveForMessages) {
+          // Archive mode: load from database
+          const archiveMessages = getMessagesFromArchive(channel.id, 50)
+          messages = archiveMessages.reverse().map(archiveRecordToMessageInfo)
+        } else if (client) {
+          // Live mode: fetch from platform
+          messages = await loadMessagesFromPlatform(client, channel.id)
+        } else {
+          messages = []
+        }
+
         dispatch({ type: 'SET_MESSAGES', messages })
         dispatch({
           type: 'SET_STATUS',
           text: `${channel.guildName ? `${channel.guildName} / ` : ''}${
             channel.name
-          } - ↑↓ select · d=del r=reply e=react i=new ←=back`,
+          } - ↑↓ select${client ? ' · d=del r=reply e=react i=new' : ''} ←=back`,
         })
       } catch (err) {
         dispatch({
@@ -864,20 +895,28 @@ export function App({
       }
       dispatch({ type: 'SET_LOADING', loading: false })
     },
-    [client]
+    [client, useArchiveForMessages]
   )
 
   // Refresh messages after an action (preserves selection)
   const refreshMessages = useCallback(
     async (channel: ChannelInfo) => {
       try {
-        const messages = await loadMessagesFromPlatform(client, channel.id)
+        let messages: MessageInfo[]
+        if (useArchiveForMessages) {
+          const archiveMessages = getMessagesFromArchive(channel.id, 50)
+          messages = archiveMessages.reverse().map(archiveRecordToMessageInfo)
+        } else if (client) {
+          messages = await loadMessagesFromPlatform(client, channel.id)
+        } else {
+          return
+        }
         dispatch({ type: 'REFRESH_MESSAGES', messages })
       } catch {
         // Silently fail refresh - user already saw the action confirmation
       }
     },
-    [client]
+    [client, useArchiveForMessages]
   )
 
   // Load older messages
@@ -888,6 +927,13 @@ export function App({
       state.messages.length === 0
     )
       return
+
+    // Archive mode doesn't support loading older (already loaded all)
+    if (useArchiveForMessages || !client) {
+      dispatch({ type: 'SET_HAS_MORE_OLDER', hasMore: false })
+      dispatch({ type: 'SET_STATUS', text: 'Archive mode - all messages loaded' })
+      return
+    }
 
     dispatch({ type: 'SET_LOADING_OLDER', loading: true })
     dispatch({ type: 'SET_STATUS', text: 'Loading older messages...' })
@@ -931,6 +977,12 @@ export function App({
   const sendMessage = useCallback(
     async (text: string) => {
       if (!state.selectedChannel || !text.trim()) return
+
+      // Archive-only mode: no sending
+      if (!client) {
+        dispatch({ type: 'SET_STATUS', text: '❌ Archive mode - read only' })
+        return
+      }
 
       dispatch({ type: 'SET_LOADING', loading: true })
       dispatch({ type: 'SET_STATUS', text: 'Sending message...' })
@@ -1011,6 +1063,12 @@ export function App({
   const deleteMessage = useCallback(async () => {
     if (state.selectedMessageIndex < 0 || !state.selectedChannel) return
 
+    // Archive-only mode: no deleting
+    if (!client) {
+      dispatch({ type: 'SET_STATUS', text: '❌ Archive mode - read only' })
+      return
+    }
+
     const msgInfo = state.messages[state.selectedMessageIndex]
     const currentUser = client.getCurrentUser()
 
@@ -1043,6 +1101,12 @@ export function App({
   const addReaction = useCallback(
     async (emoji: string) => {
       if (state.selectedMessageIndex < 0 || !state.selectedChannel) return
+
+      // Archive-only mode: no reactions
+      if (!client) {
+        dispatch({ type: 'SET_STATUS', text: '❌ Archive mode - read only' })
+        return
+      }
 
       const msgInfo = state.messages[state.selectedMessageIndex]
 
@@ -1181,7 +1245,7 @@ export function App({
         if (channel) {
           dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
           onChannelSelect?.(channel)
-          markChannelVisited(channel.id, undefined, client.type)
+          markChannelVisited(channel.id, undefined, client?.type || 'discord')
           await loadMessages(channel)
           dispatch({ type: 'SET_VIEW', view: 'messages' })
         }

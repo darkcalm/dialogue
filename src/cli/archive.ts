@@ -3,6 +3,9 @@
  * Gradually fetches message history and subscribes to real-time updates
  */
 
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
 import { DiscordPlatformClient } from '@/platforms/discord/client'
 import { IPlatformMessage, IPlatformChannel } from '@/platforms/types'
 import {
@@ -18,6 +21,7 @@ import {
   getChannelBackfillStatus,
   getTotalStats,
   messageExists,
+  channelExists,
   ensureChannelExists,
   MessageRecord,
   ChannelRecord,
@@ -28,9 +32,51 @@ const FETCH_BATCH_SIZE = 100 // Discord API limit
 const MIN_DELAY_MS = 3000 // 3 seconds minimum between fetches
 const MAX_DELAY_MS = 8000 // 8 seconds maximum between fetches
 
+// Lock file to indicate archive is running
+const ARCHIVE_LOCK_FILE = path.join(os.homedir(), '.dialogue-archive.lock')
+
 // State
 let isRunning = true
 let client: DiscordPlatformClient | null = null
+
+/**
+ * Write lock file with current PID
+ */
+function writeLockFile(): void {
+  fs.writeFileSync(ARCHIVE_LOCK_FILE, process.pid.toString(), 'utf-8')
+}
+
+/**
+ * Remove lock file
+ */
+function removeLockFile(): void {
+  try {
+    if (fs.existsSync(ARCHIVE_LOCK_FILE)) {
+      fs.unlinkSync(ARCHIVE_LOCK_FILE)
+    }
+  } catch {
+    // Ignore errors
+  }
+}
+
+/**
+ * Check if another archive instance is already running
+ */
+function isArchiveRunning(): boolean {
+  try {
+    if (!fs.existsSync(ARCHIVE_LOCK_FILE)) return false
+    const pid = parseInt(fs.readFileSync(ARCHIVE_LOCK_FILE, 'utf-8').trim(), 10)
+    // Check if process exists (throws if not)
+    process.kill(pid, 0)
+    return true
+  } catch {
+    // Process doesn't exist or lock file is invalid
+    if (fs.existsSync(ARCHIVE_LOCK_FILE)) {
+      fs.unlinkSync(ARCHIVE_LOCK_FILE)
+    }
+    return false
+  }
+}
 
 /**
  * Generate a random delay between min and max milliseconds
@@ -57,10 +103,16 @@ function messageToRecord(msg: IPlatformMessage): MessageRecord {
     authorName: msg.author,
     content: msg.content,
     timestamp: msg.timestamp,
+    editedTimestamp: msg.editedTimestamp,
     isBot: msg.isBot,
+    messageType: msg.messageType,
+    pinned: msg.pinned,
     attachments: msg.attachments.length > 0 ? msg.attachments : undefined,
+    embeds: msg.embeds.length > 0 ? msg.embeds : undefined,
+    stickers: msg.stickers.length > 0 ? msg.stickers : undefined,
     reactions: msg.reactions.length > 0 ? msg.reactions : undefined,
     replyToId: msg.replyTo?.messageId,
+    threadId: msg.threadId,
   }
 }
 
@@ -71,7 +123,10 @@ function channelToRecord(ch: IPlatformChannel): ChannelRecord {
   return {
     id: ch.id,
     name: ch.name,
+    guildId: ch.metadata?.guildId,
     guildName: ch.parentName,
+    parentId: ch.parentId,
+    topic: ch.topic,
     type: ch.type,
   }
 }
@@ -246,10 +301,19 @@ async function runBackfillLoop(
  * Handle real-time message events
  */
 function setupRealtimeHandlers(client: DiscordPlatformClient): void {
-  client.onMessage((message: IPlatformMessage) => {
+  client.onMessage(async (message: IPlatformMessage) => {
     try {
-      // Ensure channel exists before saving (satisfies foreign key constraint)
-      ensureChannelExists(message.channelId)
+      // If channel doesn't exist, fetch and save its info
+      if (!channelExists(message.channelId)) {
+        const channelInfo = await client.getChannel(message.channelId)
+        if (channelInfo) {
+          saveChannel(channelToRecord(channelInfo))
+          log(`Real-time: Discovered new channel #${channelInfo.name}`)
+        } else {
+          // Fallback if we can't fetch channel info
+          ensureChannelExists(message.channelId)
+        }
+      }
       // Save the message
       const record = messageToRecord(message)
       saveMessage(record)
@@ -260,10 +324,17 @@ function setupRealtimeHandlers(client: DiscordPlatformClient): void {
     }
   })
 
-  client.onMessageUpdate((message: IPlatformMessage) => {
+  client.onMessageUpdate(async (message: IPlatformMessage) => {
     try {
-      // Ensure channel exists before saving (satisfies foreign key constraint)
-      ensureChannelExists(message.channelId)
+      // If channel doesn't exist, fetch and save its info
+      if (!channelExists(message.channelId)) {
+        const channelInfo = await client.getChannel(message.channelId)
+        if (channelInfo) {
+          saveChannel(channelToRecord(channelInfo))
+        } else {
+          ensureChannelExists(message.channelId)
+        }
+      }
       // Update the message
       const record = messageToRecord(message)
       saveMessage(record)
@@ -283,6 +354,9 @@ function setupShutdownHandlers(): void {
     log('Shutting down...')
     isRunning = false
 
+    // Remove lock file
+    removeLockFile()
+
     // Close database
     closeDB()
     log('Database closed.')
@@ -298,6 +372,7 @@ function setupShutdownHandlers(): void {
 
   process.on('SIGINT', shutdown)
   process.on('SIGTERM', shutdown)
+  process.on('exit', removeLockFile)
 }
 
 /**
@@ -305,6 +380,15 @@ function setupShutdownHandlers(): void {
  */
 async function main(): Promise<void> {
   console.log('\nDiscord Message Archive Service\n')
+
+  // Check if already running
+  if (isArchiveRunning()) {
+    console.log('Archive service is already running. Exiting.')
+    process.exit(0)
+  }
+
+  // Write lock file
+  writeLockFile()
 
   // Initialize database
   log('Initializing database...')

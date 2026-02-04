@@ -2,9 +2,17 @@
  * CLI tool to show inbox-style channel grouping
  * Groups channels by: @-mentions, new messages, never visited
  * Uses Ink for interactive terminal UI with 1-column layout
+ *
+ * For Discord: reads data from archive database, connects live for sending.
+ * For WhatsApp: connects live for everything.
  */
 
 import { Client, GatewayIntentBits, TextChannel, ThreadChannel, Message } from 'discord.js'
+import { spawn, ChildProcess } from 'child_process'
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
+import { fileURLToPath } from 'url'
 import {
   ChannelInfo,
   loadVisitData,
@@ -18,7 +26,57 @@ import { showPlatformSelector } from './ui/showPlatformSelector'
 import { PlatformType, IPlatformClient } from '@/platforms/types'
 import { createPlatformClient } from '@/platforms/factory'
 import { getCachedMessages, setCachedMessages, createChannelKey } from './cache'
+import {
+  initDB,
+  hasArchiveData,
+  getArchivedChannels,
+  getMessagesSinceTimestamp,
+  getNewestMessageTimestamp,
+  getMessagesFromArchive,
+} from './db'
 import config from '@/helpers/env'
+
+// Lock file to detect if archive is running
+const ARCHIVE_LOCK_FILE = path.join(os.homedir(), '.dialogue-archive.lock')
+
+// Check if archive process is running
+function isArchiveRunning(): boolean {
+  try {
+    if (!fs.existsSync(ARCHIVE_LOCK_FILE)) return false
+    const pid = parseInt(fs.readFileSync(ARCHIVE_LOCK_FILE, 'utf-8').trim(), 10)
+    // Check if process exists
+    process.kill(pid, 0)
+    return true
+  } catch {
+    // Process doesn't exist or lock file is invalid
+    if (fs.existsSync(ARCHIVE_LOCK_FILE)) {
+      fs.unlinkSync(ARCHIVE_LOCK_FILE)
+    }
+    return false
+  }
+}
+
+// Spawn archive process in background
+function spawnArchiveProcess(): ChildProcess {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url))
+  const archivePath = path.join(__dirname, 'archive.mjs')
+  const child = spawn('node', [archivePath], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+  return child
+}
+
+// Wait for archive to have data (with timeout)
+async function waitForArchiveData(timeoutMs = 30000): Promise<boolean> {
+  const startTime = Date.now()
+  while (Date.now() - startTime < timeoutMs) {
+    if (hasArchiveData()) return true
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+  return false
+}
 
 interface InboxChannelInfo extends ChannelInfo {
   group: 'new' | 'following' | 'unfollowed'
@@ -166,6 +224,134 @@ async function buildWhatsAppInbox(
       unfollowedChannels.forEach(ch => {
         const badge = ch.newMessageCount ? ` [${ch.newMessageCount} new]` : ''
         displayItems.push(`${ch.name}${badge}`)
+        displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
+        channelList.push(ch)
+        channelIndex++
+      })
+    }
+  }
+
+  return { channels: channelList, displayItems, displayIndexToChannelIndex }
+}
+
+// Build inbox from archive database (fast, offline-capable)
+function buildInboxFromArchive(
+  collapsedSections: Set<SectionName> = new Set(),
+  botUserId?: string
+): {
+  channels: InboxChannelInfo[]
+  displayItems: string[]
+  displayIndexToChannelIndex: Map<number, number>
+} {
+  const visitData = loadVisitData()
+  const archivedChannels = getArchivedChannels()
+
+  const newMessageChannels: InboxChannelInfo[] = []
+  const followingChannels: InboxChannelInfo[] = []
+  const unfollowedChannels: InboxChannelInfo[] = []
+
+  for (const channel of archivedChannels) {
+    const newestTimestamp = getNewestMessageTimestamp(channel.id)
+    const lastMessageTimestamp = newestTimestamp ? new Date(newestTimestamp) : undefined
+
+    const channelInfo: InboxChannelInfo = {
+      id: channel.id,
+      name: channel.name,
+      type: (channel.type as 'text' | 'thread' | 'dm') || 'text',
+      guildName: channel.guildName,
+      group: 'following',
+      lastMessageTimestamp,
+    }
+
+    // Check visit data with platform prefix, fallback to unprefixed
+    const visitKey = `discord:${channel.id}`
+    const channelVisit = visitData[visitKey] || visitData[channel.id]
+
+    if (!channelVisit) {
+      // Unfollowed channel - check for mentions in recent messages
+      if (botUserId) {
+        const recentMessages = getMessagesFromArchive(channel.id, 5)
+        const hasMention = recentMessages.some(
+          msg => msg.content.includes(`<@${botUserId}>`) || msg.content.includes(`<@!${botUserId}>`)
+        )
+        if (hasMention) {
+          markChannelVisited(channel.id, undefined, 'discord')
+          channelInfo.group = 'new'
+          channelInfo.newMessageCount = 1
+          newMessageChannels.push(channelInfo)
+          continue
+        }
+      }
+      channelInfo.group = 'unfollowed'
+      unfollowedChannels.push(channelInfo)
+      continue
+    }
+
+    // Check for new messages since last visit
+    const lastVisitTimestamp = channelVisit.lastVisited
+    const newMessages = getMessagesSinceTimestamp(channel.id, lastVisitTimestamp, botUserId)
+
+    if (newMessages.length > 0) {
+      channelInfo.group = 'new'
+      channelInfo.newMessageCount = newMessages.length
+      newMessageChannels.push(channelInfo)
+    } else {
+      channelInfo.group = 'following'
+      followingChannels.push(channelInfo)
+    }
+  }
+
+  // Sort by timestamp (most recent first)
+  const sortByTimestamp = (a: InboxChannelInfo, b: InboxChannelInfo) => {
+    if (!a.lastMessageTimestamp && !b.lastMessageTimestamp) return 0
+    if (!a.lastMessageTimestamp) return 1
+    if (!b.lastMessageTimestamp) return -1
+    return b.lastMessageTimestamp.getTime() - a.lastMessageTimestamp.getTime()
+  }
+
+  newMessageChannels.sort(sortByTimestamp)
+  followingChannels.sort(sortByTimestamp)
+  unfollowedChannels.sort(sortByTimestamp)
+
+  // Build display list
+  const displayItems: string[] = []
+  const channelList: InboxChannelInfo[] = []
+  const displayIndexToChannelIndex: Map<number, number> = new Map()
+  let channelIndex = 0
+
+  const isCollapsed = (section: SectionName) => collapsedSections.has(section)
+  const collapseIndicator = (section: SectionName) => (isCollapsed(section) ? '▶' : '▼')
+
+  if (newMessageChannels.length > 0) {
+    displayItems.push(`══════ ${collapseIndicator('new')} 🆕 NEW (${newMessageChannels.length}) ══════`)
+    if (!isCollapsed('new')) {
+      newMessageChannels.forEach(ch => {
+        const badge = ch.newMessageCount ? ` [${ch.newMessageCount} new]` : ''
+        displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}${badge}`)
+        displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
+        channelList.push(ch)
+        channelIndex++
+      })
+    }
+  }
+
+  if (followingChannels.length > 0) {
+    displayItems.push(`══════ ${collapseIndicator('following')} ★ FOLLOWING (${followingChannels.length}) ══════`)
+    if (!isCollapsed('following')) {
+      followingChannels.forEach(ch => {
+        displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}`)
+        displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
+        channelList.push(ch)
+        channelIndex++
+      })
+    }
+  }
+
+  if (unfollowedChannels.length > 0) {
+    displayItems.push(`══════ ${collapseIndicator('unfollowed')} ○ UNFOLLOWED (${unfollowedChannels.length}) ══════`)
+    if (!isCollapsed('unfollowed')) {
+      unfollowedChannels.forEach(ch => {
+        displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
         channelList.push(ch)
         channelIndex++
@@ -385,25 +571,6 @@ async function main() {
       process.exit(0)
     }
 
-    console.log(`🔌 Connecting to ${selectedPlatform}...`)
-
-    // Create platform client
-    const platformClient = await createPlatformClient(selectedPlatform)
-    await platformClient.connect()
-
-    console.log('✅ Connected!')
-    console.log('📥 Scanning channels for inbox...')
-
-    // Auto-follow any new channels created while app was closed
-    const allChannels = await platformClient.getChannels()
-    const newlyFollowed = autoFollowNewChannels(
-      allChannels.map(ch => ({ id: ch.id, name: ch.name })),
-      selectedPlatform
-    )
-    if (newlyFollowed.length > 0) {
-      console.log(`📢 Auto-followed ${newlyFollowed.length} new channel(s)`)
-    }
-
     // Track collapsed sections - "unfollowed" collapsed by default
     const collapsedSections = new Set<SectionName>(['unfollowed'])
 
@@ -414,18 +581,66 @@ async function main() {
       displayIndexToChannelIndex: Map<number, number>
     }
 
+    let platformClient: IPlatformClient | null = null
+    let botUserId: string | undefined
+
     if (selectedPlatform === 'discord') {
-      // Get native Discord client for inbox scanning (temporary - will be refactored)
-      const client = platformClient.getNativeClient() as Client
-      inboxData = await buildInboxChannels(client, collapsedSections)
+      // Discord: use archive for data, connect live for sending
+      // Ensure archive process is running
+      if (!isArchiveRunning()) {
+        console.log('🚀 Starting archive service in background...')
+        spawnArchiveProcess()
+
+        // Wait for archive to start and have some data
+        console.log('⏳ Waiting for archive to initialize...')
+        initDB()
+        const hasData = await waitForArchiveData(60000) // Wait up to 60 seconds
+
+        if (!hasData) {
+          console.log('⚠️  Archive is starting but no data yet. Please wait and try again.')
+          process.exit(1)
+        }
+      } else {
+        console.log('📚 Archive service is running')
+        initDB()
+      }
+
+      // Connect to Discord for sending messages
+      console.log(`🔌 Connecting to ${selectedPlatform}...`)
+      platformClient = await createPlatformClient(selectedPlatform)
+      await platformClient.connect()
+      console.log('✅ Connected!')
+
+      botUserId = platformClient.getCurrentUser()?.id
+
+      // Build inbox from archive
+      console.log('📥 Loading inbox from archive...')
+      inboxData = buildInboxFromArchive(collapsedSections, botUserId)
     } else {
-      // For WhatsApp, build grouped inbox
+      // WhatsApp: connect live for everything
+      console.log(`🔌 Connecting to ${selectedPlatform}...`)
+      platformClient = await createPlatformClient(selectedPlatform)
+      await platformClient.connect()
+
+      console.log('✅ Connected!')
+      console.log('📥 Scanning channels for inbox...')
+
+      // Auto-follow any new channels created while app was closed
+      const allChannels = await platformClient.getChannels()
+      const newlyFollowed = autoFollowNewChannels(
+        allChannels.map(ch => ({ id: ch.id, name: ch.name })),
+        selectedPlatform
+      )
+      if (newlyFollowed.length > 0) {
+        console.log(`📢 Auto-followed ${newlyFollowed.length} new channel(s)`)
+      }
+
       inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
     }
     
     if (inboxData.channels.length === 0 && inboxData.displayItems.length === 0) {
       console.log('❌ No accessible channels found')
-      await platformClient.disconnect()
+      if (platformClient) await platformClient.disconnect()
       process.exit(0)
     }
 
@@ -433,7 +648,7 @@ async function main() {
     console.log('Starting UI...\n')
 
     // Auto-follow new channels when they are created
-    if (platformClient.onChannelCreate) {
+    if (platformClient?.onChannelCreate) {
       platformClient.onChannelCreate((channel) => {
         console.log(`📢 New channel detected: ${channel.name} - auto-following...`)
         markChannelVisited(channel.id, undefined, selectedPlatform)
@@ -450,9 +665,8 @@ async function main() {
     // Refresh callback - rebuilds channel list
     const onRefreshChannels = async () => {
       if (selectedPlatform === 'discord') {
-        const client = platformClient.getNativeClient() as Client
-        inboxData = await buildInboxChannels(client, collapsedSections)
-      } else {
+        inboxData = buildInboxFromArchive(collapsedSections, botUserId)
+      } else if (platformClient) {
         inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
       }
       return { channels: inboxData.channels, displayItems: inboxData.displayItems }
@@ -466,9 +680,8 @@ async function main() {
         collapsedSections.add(section)
       }
       if (selectedPlatform === 'discord') {
-        const client = platformClient.getNativeClient() as Client
-        inboxData = await buildInboxChannels(client, collapsedSections)
-      } else {
+        inboxData = buildInboxFromArchive(collapsedSections, botUserId)
+      } else if (platformClient) {
         inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
       }
       return { channels: inboxData.channels, displayItems: inboxData.displayItems }
@@ -478,9 +691,8 @@ async function main() {
     const onFollowChannel = async (channel: ChannelInfo) => {
       markChannelVisited(channel.id, undefined, selectedPlatform)
       if (selectedPlatform === 'discord') {
-        const client = platformClient.getNativeClient() as Client
-        inboxData = await buildInboxChannels(client, collapsedSections)
-      } else {
+        inboxData = buildInboxFromArchive(collapsedSections, botUserId)
+      } else if (platformClient) {
         inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
       }
       return { channels: inboxData.channels, displayItems: inboxData.displayItems }
@@ -490,9 +702,8 @@ async function main() {
     const onUnfollowChannel = async (channel: ChannelInfo) => {
       removeChannelVisit(channel.id, selectedPlatform)
       if (selectedPlatform === 'discord') {
-        const client = platformClient.getNativeClient() as Client
-        inboxData = await buildInboxChannels(client, collapsedSections)
-      } else {
+        inboxData = buildInboxFromArchive(collapsedSections, botUserId)
+      } else if (platformClient) {
         inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
       }
       return { channels: inboxData.channels, displayItems: inboxData.displayItems }
@@ -504,18 +715,19 @@ async function main() {
       initialChannels: inboxData.channels,
       initialDisplayItems: inboxData.displayItems,
       title: `${selectedPlatform.charAt(0).toUpperCase() + selectedPlatform.slice(1)} Inbox`,
+      useArchiveForMessages: selectedPlatform === 'discord',
       getChannelFromDisplayIndex,
       onRefreshChannels,
       onFollowChannel,
       onUnfollowChannel,
       onToggleSection,
       onExit: async () => {
-        await platformClient.disconnect()
+        if (platformClient) await platformClient.disconnect()
       }
     })
 
     await waitUntilExit()
-    await platformClient.disconnect()
+    if (platformClient) await platformClient.disconnect()
     process.exit(0)
   } catch (error) {
     console.error('❌ Error:', error instanceof Error ? error.message : 'Unknown error')

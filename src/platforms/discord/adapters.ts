@@ -18,6 +18,8 @@ import {
   IAttachment,
   IReaction,
   IMessageReference,
+  IEmbed,
+  ISticker,
 } from '../types'
 
 // ==================== Channel Adapters ====================
@@ -42,10 +44,25 @@ export function adaptDiscordChannel(
     type = 'text' // Fallback
   }
 
-  // Get parent name (guild name for text channels)
+  // Get parent info
+  let parentId: string | undefined
   let parentName: string | undefined
+  let topic: string | undefined
+
   if ('guild' in channel && channel.guild) {
+    parentId = channel.guild.id
     parentName = channel.guild.name
+  }
+
+  // For threads, also capture parent channel ID
+  if (channel.isThread() && channel.parentId) {
+    // Store guild ID in metadata, use parentId for thread's parent channel
+    parentId = channel.parentId
+  }
+
+  // Get topic if available
+  if ('topic' in channel && channel.topic) {
+    topic = channel.topic
   }
 
   return {
@@ -53,9 +70,12 @@ export function adaptDiscordChannel(
     name: channel.isThread() ? channel.name : ('name' in channel ? channel.name : 'DM'),
     type,
     platform: 'discord',
+    parentId,
     parentName,
+    topic,
     metadata: {
       nativeChannel: channel,
+      guildId: 'guild' in channel && channel.guild ? channel.guild.id : undefined,
     },
   }
 }
@@ -138,6 +158,36 @@ async function adaptDiscordReplyInfo(message: Message): Promise<IMessageReferenc
 }
 
 /**
+ * Convert Discord.js embed to platform embed interface
+ */
+function adaptDiscordEmbed(embed: Message['embeds'][0]): IEmbed {
+  return {
+    type: embed.data.type,
+    title: embed.title || undefined,
+    description: embed.description || undefined,
+    url: embed.url || undefined,
+    color: embed.color || undefined,
+    timestamp: embed.timestamp || undefined,
+    footer: embed.footer ? { text: embed.footer.text, iconUrl: embed.footer.iconURL || undefined } : undefined,
+    image: embed.image ? { url: embed.image.url, width: embed.image.width, height: embed.image.height } : undefined,
+    thumbnail: embed.thumbnail ? { url: embed.thumbnail.url, width: embed.thumbnail.width, height: embed.thumbnail.height } : undefined,
+    author: embed.author ? { name: embed.author.name, url: embed.author.url || undefined, iconUrl: embed.author.iconURL || undefined } : undefined,
+    fields: embed.fields?.map(f => ({ name: f.name, value: f.value, inline: f.inline })),
+  }
+}
+
+/**
+ * Convert Discord.js sticker to platform sticker interface
+ */
+function adaptDiscordSticker(sticker: Message['stickers'] extends Map<string, infer S> ? S : never): ISticker {
+  return {
+    id: sticker.id,
+    name: sticker.name,
+    formatType: sticker.format,
+  }
+}
+
+/**
  * Convert Discord.js message to platform message interface
  */
 export async function adaptDiscordMessage(message: Message): Promise<IPlatformMessage> {
@@ -150,6 +200,12 @@ export async function adaptDiscordMessage(message: Message): Promise<IPlatformMe
   // Convert attachments
   const attachments = Array.from(message.attachments.values()).map(adaptDiscordAttachment)
 
+  // Convert embeds
+  const embeds = message.embeds.map(adaptDiscordEmbed)
+
+  // Convert stickers
+  const stickers = Array.from(message.stickers.values()).map(adaptDiscordSticker)
+
   return {
     id: message.id,
     channelId: message.channelId,
@@ -157,11 +213,17 @@ export async function adaptDiscordMessage(message: Message): Promise<IPlatformMe
     authorId: message.author.id,
     content: message.content,
     timestamp: message.createdAt.toISOString(),
+    editedTimestamp: message.editedAt?.toISOString(),
     date: message.createdAt,
     isBot: message.author.bot,
+    messageType: message.type.toString(),
+    pinned: message.pinned,
     attachments,
+    embeds,
+    stickers,
     reactions,
     replyTo,
+    threadId: message.thread?.id,
     metadata: {
       nativeMessage: message,
     },
@@ -193,6 +255,12 @@ export function adaptDiscordMessageSync(message: Message): IPlatformMessage {
   // Convert attachments
   const attachments = Array.from(message.attachments.values()).map(adaptDiscordAttachment)
 
+  // Convert embeds
+  const embeds = message.embeds.map(adaptDiscordEmbed)
+
+  // Convert stickers
+  const stickers = Array.from(message.stickers.values()).map(adaptDiscordSticker)
+
   // Basic reply info without fetching
   let replyTo: IMessageReference | undefined
   if (message.reference?.messageId) {
@@ -210,11 +278,17 @@ export function adaptDiscordMessageSync(message: Message): IPlatformMessage {
     authorId: message.author.id,
     content: message.content,
     timestamp: message.createdAt.toISOString(),
+    editedTimestamp: message.editedAt?.toISOString(),
     date: message.createdAt,
     isBot: message.author.bot,
+    messageType: message.type.toString(),
+    pinned: message.pinned,
     attachments,
+    embeds,
+    stickers,
     reactions,
     replyTo,
+    threadId: message.thread?.id,
     metadata: {
       nativeMessage: message,
     },
