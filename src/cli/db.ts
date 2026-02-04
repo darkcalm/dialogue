@@ -623,3 +623,60 @@ export async function getMessageUrl(messageId: string): Promise<string | null> {
 
   return null
 }
+
+/**
+ * Delete a message from the database
+ */
+export async function deleteMessage(messageId: string): Promise<boolean> {
+  const db = getClient()
+  const result = await db.execute({
+    sql: `DELETE FROM messages WHERE id = ?`,
+    args: [messageId],
+  })
+  return result.rowsAffected > 0
+}
+
+/**
+ * Delete messages in a time range for a channel
+ * Returns the number of messages deleted
+ */
+export async function deleteMessagesInTimeRange(
+  channelId: string,
+  startTime: string,
+  endTime: string
+): Promise<number> {
+  const db = getClient()
+  const result = await db.execute({
+    sql: `DELETE FROM messages WHERE channel_id = ? AND timestamp >= ? AND timestamp <= ?`,
+    args: [channelId, startTime, endTime],
+  })
+  return result.rowsAffected
+}
+
+/**
+ * Get message IDs in a time range for a channel (for refill boundary detection)
+ */
+export async function getMessageIdsInTimeRange(
+  channelId: string,
+  startTime: string,
+  endTime: string
+): Promise<{ oldest: string | null; newest: string | null; count: number }> {
+  const db = getClient()
+  const result = await db.execute({
+    sql: `
+      SELECT 
+        MIN(id) as oldest,
+        MAX(id) as newest,
+        COUNT(*) as count
+      FROM messages 
+      WHERE channel_id = ? AND timestamp >= ? AND timestamp <= ?
+    `,
+    args: [channelId, startTime, endTime],
+  })
+  const row = result.rows[0]
+  return {
+    oldest: (row?.oldest as string) || null,
+    newest: (row?.newest as string) || null,
+    count: Number(row?.count) || 0,
+  }
+}

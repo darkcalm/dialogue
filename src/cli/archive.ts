@@ -19,9 +19,13 @@ import {
   updateChannelOldestFetched,
   getChannelBackfillStatus,
   getTotalStats,
+  getChannelStats,
   messageExists,
   channelExists,
   ensureChannelExists,
+  deleteMessage,
+  deleteMessagesInTimeRange,
+  getMessageIdsInTimeRange,
   MessageRecord,
   ChannelRecord,
 } from './db'
@@ -339,6 +343,18 @@ function setupRealtimeHandlers(client: DiscordPlatformClient): void {
       log(`Real-time: Failed to update message ${message.id}: ${errorMessage}`)
     }
   })
+
+  client.onMessageDelete(async (channelId: string, messageId: string) => {
+    try {
+      const deleted = await deleteMessage(messageId)
+      if (deleted) {
+        log(`Real-time: Deleted message ${messageId} from channel ${channelId}`)
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      log(`Real-time: Failed to delete message ${messageId}: ${errorMessage}`)
+    }
+  })
 }
 
 /**
@@ -371,14 +387,213 @@ function setupShutdownHandlers(): void {
 }
 
 /**
+ * Refill messages for a channel within a time range
+ * Deletes existing messages in the range and refetches from Discord
+ */
+export async function refillTimeRange(
+  client: DiscordPlatformClient,
+  channelId: string,
+  startTime: string,
+  endTime: string
+): Promise<{ deleted: number; fetched: number }> {
+  log(`Refill: Starting for channel ${channelId} from ${startTime} to ${endTime}`)
+
+  // Get channel info for logging
+  const channelInfo = await client.getChannel(channelId)
+  const channelName = channelInfo?.name || channelId
+
+  // Get info about what we're deleting
+  const rangeInfo = await getMessageIdsInTimeRange(channelId, startTime, endTime)
+  log(`Refill: Found ${rangeInfo.count} messages to flush in #${channelName}`)
+
+  // Delete messages in the time range
+  const deleted = await deleteMessagesInTimeRange(channelId, startTime, endTime)
+  log(`Refill: Deleted ${deleted} messages from #${channelName}`)
+
+  // Fetch fresh messages from Discord
+  // We need to fetch all messages in the time range, which may require multiple API calls
+  let fetched = 0
+  let lastMessageId: string | undefined
+  const startDate = new Date(startTime)
+  const endDate = new Date(endTime)
+
+  // First, get the most recent messages and work backwards
+  let messages = await client.getMessages(channelId, FETCH_BATCH_SIZE)
+
+  while (messages.length > 0 && isRunning) {
+    // Filter to only messages within our time range
+    const inRangeMessages = messages.filter((msg) => {
+      const msgDate = new Date(msg.timestamp)
+      return msgDate >= startDate && msgDate <= endDate
+    })
+
+    if (inRangeMessages.length > 0) {
+      const records = inRangeMessages.map(messageToRecord)
+      await saveMessages(records)
+      fetched += inRangeMessages.length
+      log(`Refill: Saved ${inRangeMessages.length} messages in #${channelName}`)
+    }
+
+    // Check if we've gone past our time range
+    const oldestInBatch = messages[messages.length - 1]
+    const oldestDate = new Date(oldestInBatch.timestamp)
+
+    if (oldestDate < startDate) {
+      // We've gone past the start of our range, stop
+      break
+    }
+
+    // Get the next batch
+    lastMessageId = oldestInBatch.id
+    await sleep(randomDelay())
+    messages = await client.getMessagesBefore(channelId, lastMessageId, FETCH_BATCH_SIZE)
+  }
+
+  log(`Refill: Complete for #${channelName}. Deleted ${deleted}, fetched ${fetched}`)
+  return { deleted, fetched }
+}
+
+/**
+ * Show archive status and exit
+ */
+async function showStatus(): Promise<void> {
+  await initDB()
+  const stats = await getTotalStats()
+  const channelStats = await getChannelStats()
+
+  console.log('\nArchive Status\n')
+  console.log(`Total messages: ${stats.totalMessages.toLocaleString()}`)
+  console.log(`Total channels: ${stats.totalChannels}`)
+  console.log(`Backfill: ${stats.channelsComplete} complete, ${stats.channelsInProgress} in progress`)
+  console.log(`Running: ${isArchiveRunning() ? 'yes (PID ' + fs.readFileSync(ARCHIVE_LOCK_FILE, 'utf-8').trim() + ')' : 'no'}`)
+
+  if (channelStats.length > 0) {
+    console.log('\nChannels:')
+    for (const ch of channelStats.slice(0, 20)) {
+      const status = ch.backfillComplete ? '✓' : '…'
+      console.log(`  ${status} #${ch.name}: ${ch.messageCount.toLocaleString()} messages`)
+    }
+    if (channelStats.length > 20) {
+      console.log(`  ... and ${channelStats.length - 20} more`)
+    }
+  }
+
+  closeDB()
+}
+
+/**
+ * Parse duration string (e.g., "12h", "24h", "7d") to milliseconds
+ */
+function parseDuration(duration: string): number {
+  const match = duration.match(/^(\d+)(h|d)$/)
+  if (!match) {
+    throw new Error(`Invalid duration format: ${duration}. Use format like "12h" or "7d"`)
+  }
+  const value = parseInt(match[1], 10)
+  const unit = match[2]
+  if (unit === 'h') return value * 60 * 60 * 1000
+  if (unit === 'd') return value * 24 * 60 * 60 * 1000
+  throw new Error(`Unknown unit: ${unit}`)
+}
+
+/**
+ * Run refill for all channels for a given duration
+ */
+async function runRefill(durationStr: string = '12h'): Promise<void> {
+  console.log('\nDiscord Message Archive - Refill Mode\n')
+
+  // Check if archive is running
+  if (isArchiveRunning()) {
+    console.log('Error: Archive service is currently running.')
+    console.log('Please stop it first (Ctrl+C or kill the process), then run --refill.')
+    process.exit(1)
+  }
+
+  const durationMs = parseDuration(durationStr)
+  const endTime = new Date()
+  const startTime = new Date(endTime.getTime() - durationMs)
+
+  log(`Refill: Will flush and refetch messages from ${startTime.toISOString()} to ${endTime.toISOString()}`)
+
+  // Initialize database
+  log('Initializing database...')
+  await initDB()
+
+  // Connect to Discord
+  log('Connecting to Discord...')
+  const refillClient = new DiscordPlatformClient()
+
+  try {
+    await refillClient.connect()
+    log('Connected to Discord!')
+
+    // Get all channels
+    const channels = await refillClient.getChannels()
+    log(`Found ${channels.length} channels to refill`)
+
+    let totalDeleted = 0
+    let totalFetched = 0
+
+    for (const channel of channels) {
+      if (!isRunning) break
+
+      try {
+        const result = await refillTimeRange(
+          refillClient,
+          channel.id,
+          startTime.toISOString(),
+          endTime.toISOString()
+        )
+        totalDeleted += result.deleted
+        totalFetched += result.fetched
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        log(`Refill: Error on #${channel.name}: ${errorMessage}`)
+      }
+
+      // Small delay between channels
+      await sleep(1000)
+    }
+
+    log(`\nRefill complete!`)
+    log(`Total deleted: ${totalDeleted}`)
+    log(`Total fetched: ${totalFetched}`)
+
+    await refillClient.disconnect()
+    closeDB()
+    process.exit(0)
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    console.error('Fatal error:', errorMessage)
+    closeDB()
+    process.exit(1)
+  }
+}
+
+/**
  * Main entry point
  */
 async function main(): Promise<void> {
+  // Handle --status flag
+  if (process.argv.includes('--status')) {
+    await showStatus()
+    process.exit(0)
+  }
+
+  // Handle --refill flag
+  const refillArg = process.argv.find((arg) => arg.startsWith('--refill'))
+  if (refillArg) {
+    // Parse optional duration: --refill or --refill=24h
+    const duration = refillArg.includes('=') ? refillArg.split('=')[1] : '12h'
+    await runRefill(duration)
+    return
+  }
+
   console.log('\nDiscord Message Archive Service\n')
 
   // Check if already running
   if (isArchiveRunning()) {
-    console.log('Archive service is already running. Exiting.')
+    console.log('Archive service is already running. Use --status to see progress.')
     process.exit(0)
   }
 
