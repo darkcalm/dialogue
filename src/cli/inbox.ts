@@ -723,6 +723,11 @@ async function main() {
       return { channels: inboxData.channels, displayItems: inboxData.displayItems }
     }
 
+    // Extract channels with new messages for auto-expand
+    const channelsWithNewMessages = inboxData.channels.filter(
+      (ch) => (ch as InboxChannelInfo).group === 'new'
+    )
+
     // Render the Ink app
     const { waitUntilExit } = renderApp({
       client: platformClient,
@@ -730,6 +735,7 @@ async function main() {
       initialDisplayItems: inboxData.displayItems,
       title: `${selectedPlatform.charAt(0).toUpperCase() + selectedPlatform.slice(1)} Inbox`,
       useArchiveForMessages: selectedPlatform === 'discord',
+      channelsWithNewMessages,
       getChannelFromDisplayIndex,
       onRefreshChannels,
       onFollowChannel,

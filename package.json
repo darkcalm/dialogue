@@ -13,7 +13,8 @@
     "build:cli-esm": "node scripts/build-cli-esm.mjs",
     "known": "npm run build:cli-esm && node dist-esm/known.mjs",
     "inbox": "npm run build:cli-esm && node dist-esm/inbox.mjs",
-    "archive": "npm run build:cli-esm && node dist-esm/archive.mjs"
+    "archive": "npm run build:cli-esm && node dist-esm/archive.mjs",
+    "archive:whatsapp": "npm run build:cli-esm && node dist-esm/whatsapp-archive.mjs"
   },
   "keywords": [
     "discord-bot",
