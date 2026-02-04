@@ -869,7 +869,7 @@ export function App({
 
         if (useArchiveForMessages) {
           // Archive mode: load from database
-          const archiveMessages = getMessagesFromArchive(channel.id, 50)
+          const archiveMessages = await getMessagesFromArchive(channel.id, 50)
           messages = archiveMessages.reverse().map(archiveRecordToMessageInfo)
         } else if (client) {
           // Live mode: fetch from platform
@@ -904,7 +904,7 @@ export function App({
       try {
         let messages: MessageInfo[]
         if (useArchiveForMessages) {
-          const archiveMessages = getMessagesFromArchive(channel.id, 50)
+          const archiveMessages = await getMessagesFromArchive(channel.id, 50)
           messages = archiveMessages.reverse().map(archiveRecordToMessageInfo)
         } else if (client) {
           messages = await loadMessagesFromPlatform(client, channel.id)

@@ -15,7 +15,6 @@ import {
   saveMessage,
   saveMessages,
   getOldestMessageId,
-  getNewestMessageId,
   getChannelsWithMessages,
   updateChannelOldestFetched,
   getChannelBackfillStatus,
@@ -89,7 +88,7 @@ function randomDelay(): number {
  * Sleep for a given number of milliseconds
  */
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /**
@@ -143,15 +142,12 @@ function log(message: string): void {
  * Backfill history for a single channel
  * Returns true if more messages are available, false if backfill is complete
  */
-async function backfillChannel(
-  client: DiscordPlatformClient,
-  channel: IPlatformChannel
-): Promise<boolean> {
+async function backfillChannel(client: DiscordPlatformClient, channel: IPlatformChannel): Promise<boolean> {
   // Get the oldest message we have for this channel
-  const oldestId = getOldestMessageId(channel.id)
+  const oldestId = await getOldestMessageId(channel.id)
 
   // Check if backfill is already complete
-  const status = getChannelBackfillStatus(channel.id)
+  const status = await getChannelBackfillStatus(channel.id)
   if (status?.oldestFetchedId === 'COMPLETE') {
     return false
   }
@@ -169,20 +165,20 @@ async function backfillChannel(
 
     if (messages.length === 0) {
       // No more messages - backfill complete
-      updateChannelOldestFetched(channel.id, 'COMPLETE')
+      await updateChannelOldestFetched(channel.id, 'COMPLETE')
       log(`  Backfill complete for #${channel.name}`)
       return false
     }
 
     // Save messages
     const records = messages.map(messageToRecord)
-    saveMessages(records)
+    await saveMessages(records)
 
     log(`  Saved ${messages.length} messages from #${channel.name}`)
 
     // If we got fewer than the batch size, we've reached the beginning
     if (messages.length < FETCH_BATCH_SIZE) {
-      updateChannelOldestFetched(channel.id, 'COMPLETE')
+      await updateChannelOldestFetched(channel.id, 'COMPLETE')
       log(`  Backfill complete for #${channel.name}`)
       return false
     }
@@ -199,11 +195,8 @@ async function backfillChannel(
  * Catch up on messages that arrived while the archiver was offline
  * For each channel with existing messages, fetch recent messages and save any new ones
  */
-async function catchUpMissedMessages(
-  client: DiscordPlatformClient,
-  channels: IPlatformChannel[]
-): Promise<void> {
-  const channelsWithMessages = getChannelsWithMessages()
+async function catchUpMissedMessages(client: DiscordPlatformClient, channels: IPlatformChannel[]): Promise<void> {
+  const channelsWithMessages = await getChannelsWithMessages()
 
   if (channelsWithMessages.length === 0) {
     log('No existing messages - skipping catch-up phase')
@@ -212,7 +205,7 @@ async function catchUpMissedMessages(
 
   log(`Catching up on ${channelsWithMessages.length} channels...`)
 
-  const channelMap = new Map(channels.map(ch => [ch.id, ch]))
+  const channelMap = new Map(channels.map((ch) => [ch.id, ch]))
   let totalNewMessages = 0
 
   for (const channelId of channelsWithMessages) {
@@ -228,11 +221,16 @@ async function catchUpMissedMessages(
       if (recentMessages.length === 0) continue
 
       // Filter to only messages we don't have yet
-      const newMessages = recentMessages.filter(msg => !messageExists(msg.id))
+      const newMessages: IPlatformMessage[] = []
+      for (const msg of recentMessages) {
+        if (!(await messageExists(msg.id))) {
+          newMessages.push(msg)
+        }
+      }
 
       if (newMessages.length > 0) {
         const records = newMessages.map(messageToRecord)
-        saveMessages(records)
+        await saveMessages(records)
         totalNewMessages += newMessages.length
         log(`  Caught up ${newMessages.length} new messages in #${channel.name}`)
       }
@@ -255,13 +253,10 @@ async function catchUpMissedMessages(
 /**
  * Main backfill loop - round-robin through channels
  */
-async function runBackfillLoop(
-  client: DiscordPlatformClient,
-  channels: IPlatformChannel[]
-): Promise<void> {
+async function runBackfillLoop(client: DiscordPlatformClient, channels: IPlatformChannel[]): Promise<void> {
   // Track which channels still have more history to fetch
-  const activeChannels = new Set(channels.map(ch => ch.id))
-  const channelMap = new Map(channels.map(ch => [ch.id, ch]))
+  const activeChannels = new Set(channels.map((ch) => ch.id))
+  const channelMap = new Map(channels.map((ch) => [ch.id, ch]))
 
   log(`Starting backfill for ${activeChannels.size} channels...`)
 
@@ -287,7 +282,7 @@ async function runBackfillLoop(
 
     // Show progress
     if (activeChannels.size > 0) {
-      const stats = getTotalStats()
+      const stats = await getTotalStats()
       log(`Progress: ${stats.totalMessages} messages archived, ${activeChannels.size} channels remaining`)
     }
   }
@@ -304,19 +299,19 @@ function setupRealtimeHandlers(client: DiscordPlatformClient): void {
   client.onMessage(async (message: IPlatformMessage) => {
     try {
       // If channel doesn't exist, fetch and save its info
-      if (!channelExists(message.channelId)) {
+      if (!(await channelExists(message.channelId))) {
         const channelInfo = await client.getChannel(message.channelId)
         if (channelInfo) {
-          saveChannel(channelToRecord(channelInfo))
+          await saveChannel(channelToRecord(channelInfo))
           log(`Real-time: Discovered new channel #${channelInfo.name}`)
         } else {
           // Fallback if we can't fetch channel info
-          ensureChannelExists(message.channelId)
+          await ensureChannelExists(message.channelId)
         }
       }
       // Save the message
       const record = messageToRecord(message)
-      saveMessage(record)
+      await saveMessage(record)
       log(`Real-time: Saved message from ${message.author} in channel ${message.channelId}`)
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -327,17 +322,17 @@ function setupRealtimeHandlers(client: DiscordPlatformClient): void {
   client.onMessageUpdate(async (message: IPlatformMessage) => {
     try {
       // If channel doesn't exist, fetch and save its info
-      if (!channelExists(message.channelId)) {
+      if (!(await channelExists(message.channelId))) {
         const channelInfo = await client.getChannel(message.channelId)
         if (channelInfo) {
-          saveChannel(channelToRecord(channelInfo))
+          await saveChannel(channelToRecord(channelInfo))
         } else {
-          ensureChannelExists(message.channelId)
+          await ensureChannelExists(message.channelId)
         }
       }
       // Update the message
       const record = messageToRecord(message)
-      saveMessage(record)
+      await saveMessage(record)
       log(`Real-time: Updated message ${message.id}`)
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
@@ -392,7 +387,7 @@ async function main(): Promise<void> {
 
   // Initialize database
   log('Initializing database...')
-  initDB()
+  await initDB()
 
   // Set up shutdown handlers
   setupShutdownHandlers()
@@ -417,7 +412,7 @@ async function main(): Promise<void> {
 
     // Save all channels to database
     for (const channel of channels) {
-      saveChannel(channelToRecord(channel))
+      await saveChannel(channelToRecord(channel))
     }
 
     // Set up real-time message handling
@@ -425,7 +420,7 @@ async function main(): Promise<void> {
     setupRealtimeHandlers(client)
 
     // Show current stats
-    const stats = getTotalStats()
+    const stats = await getTotalStats()
     log(`Current archive: ${stats.totalMessages} messages in ${stats.totalChannels} channels`)
     log(`Backfill status: ${stats.channelsComplete} complete, ${stats.channelsInProgress} in progress`)
 

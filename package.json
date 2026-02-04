@@ -58,10 +58,9 @@
   "dependencies": {
     "@discordjs/rest": "^1.5.0",
     "@inkjs/ui": "^2.0.0",
-    "@types/better-sqlite3": "^7.6.13",
+    "@libsql/client": "^0.17.0",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "@zenobius/ink-mouse": "^1.0.3",
-    "better-sqlite3": "^12.6.2",
     "discord.js": "^14.7.1",
     "dotenv": "^16.0.3",
     "envalid": "^7.3.1",

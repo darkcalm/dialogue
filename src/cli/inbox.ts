@@ -72,8 +72,8 @@ function spawnArchiveProcess(): ChildProcess {
 async function waitForArchiveData(timeoutMs = 30000): Promise<boolean> {
   const startTime = Date.now()
   while (Date.now() - startTime < timeoutMs) {
-    if (hasArchiveData()) return true
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    if (await hasArchiveData()) return true
+    await new Promise((resolve) => setTimeout(resolve, 1000))
   }
   return false
 }
@@ -128,8 +128,7 @@ async function buildWhatsAppInbox(
           const messages = await platformClient.getMessages(channel.id, 5)
           const hasMention = messages.some(
             (msg) =>
-              msg.content.includes(`@${currentUser.username}`) ||
-              msg.content.includes(`@${currentUser.id}`)
+              msg.content.includes(`@${currentUser.username}`) || msg.content.includes(`@${currentUser.id}`)
           )
           if (hasMention) {
             markChannelVisited(channel.id, undefined, 'whatsapp')
@@ -191,12 +190,12 @@ async function buildWhatsAppInbox(
   let channelIndex = 0
 
   const isCollapsed = (section: SectionName) => collapsedSections.has(section)
-  const collapseIndicator = (section: SectionName) => isCollapsed(section) ? '▶' : '▼'
+  const collapseIndicator = (section: SectionName) => (isCollapsed(section) ? '▶' : '▼')
 
   if (newMessageChannels.length > 0) {
     displayItems.push(`══════ ${collapseIndicator('new')} 🆕 NEW (${newMessageChannels.length}) ══════`)
     if (!isCollapsed('new')) {
-      newMessageChannels.forEach(ch => {
+      newMessageChannels.forEach((ch) => {
         const badge = ch.newMessageCount ? ` [${ch.newMessageCount} new]` : ''
         displayItems.push(`${ch.name}${badge}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
@@ -207,9 +206,11 @@ async function buildWhatsAppInbox(
   }
 
   if (followingChannels.length > 0) {
-    displayItems.push(`══════ ${collapseIndicator('following')} ★ FOLLOWING (${followingChannels.length}) ══════`)
+    displayItems.push(
+      `══════ ${collapseIndicator('following')} ★ FOLLOWING (${followingChannels.length}) ══════`
+    )
     if (!isCollapsed('following')) {
-      followingChannels.forEach(ch => {
+      followingChannels.forEach((ch) => {
         displayItems.push(ch.name)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
         channelList.push(ch)
@@ -219,9 +220,11 @@ async function buildWhatsAppInbox(
   }
 
   if (unfollowedChannels.length > 0) {
-    displayItems.push(`══════ ${collapseIndicator('unfollowed')} ○ UNFOLLOWED (${unfollowedChannels.length}) ══════`)
+    displayItems.push(
+      `══════ ${collapseIndicator('unfollowed')} ○ UNFOLLOWED (${unfollowedChannels.length}) ══════`
+    )
     if (!isCollapsed('unfollowed')) {
-      unfollowedChannels.forEach(ch => {
+      unfollowedChannels.forEach((ch) => {
         const badge = ch.newMessageCount ? ` [${ch.newMessageCount} new]` : ''
         displayItems.push(`${ch.name}${badge}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
@@ -235,23 +238,23 @@ async function buildWhatsAppInbox(
 }
 
 // Build inbox from archive database (fast, offline-capable)
-function buildInboxFromArchive(
+async function buildInboxFromArchive(
   collapsedSections: Set<SectionName> = new Set(),
   botUserId?: string
-): {
+): Promise<{
   channels: InboxChannelInfo[]
   displayItems: string[]
   displayIndexToChannelIndex: Map<number, number>
-} {
+}> {
   const visitData = loadVisitData()
-  const archivedChannels = getArchivedChannels()
+  const archivedChannels = await getArchivedChannels()
 
   const newMessageChannels: InboxChannelInfo[] = []
   const followingChannels: InboxChannelInfo[] = []
   const unfollowedChannels: InboxChannelInfo[] = []
 
   for (const channel of archivedChannels) {
-    const newestTimestamp = getNewestMessageTimestamp(channel.id)
+    const newestTimestamp = await getNewestMessageTimestamp(channel.id)
     const lastMessageTimestamp = newestTimestamp ? new Date(newestTimestamp) : undefined
 
     const channelInfo: InboxChannelInfo = {
@@ -270,9 +273,9 @@ function buildInboxFromArchive(
     if (!channelVisit) {
       // Unfollowed channel - check for mentions in recent messages
       if (botUserId) {
-        const recentMessages = getMessagesFromArchive(channel.id, 5)
+        const recentMessages = await getMessagesFromArchive(channel.id, 5)
         const hasMention = recentMessages.some(
-          msg => msg.content.includes(`<@${botUserId}>`) || msg.content.includes(`<@!${botUserId}>`)
+          (msg) => msg.content.includes(`<@${botUserId}>`) || msg.content.includes(`<@!${botUserId}>`)
         )
         if (hasMention) {
           markChannelVisited(channel.id, undefined, 'discord')
@@ -289,7 +292,7 @@ function buildInboxFromArchive(
 
     // Check for new messages since last visit
     const lastVisitTimestamp = channelVisit.lastVisited
-    const newMessages = getMessagesSinceTimestamp(channel.id, lastVisitTimestamp, botUserId)
+    const newMessages = await getMessagesSinceTimestamp(channel.id, lastVisitTimestamp, botUserId)
 
     if (newMessages.length > 0) {
       channelInfo.group = 'new'
@@ -325,7 +328,7 @@ function buildInboxFromArchive(
   if (newMessageChannels.length > 0) {
     displayItems.push(`══════ ${collapseIndicator('new')} 🆕 NEW (${newMessageChannels.length}) ══════`)
     if (!isCollapsed('new')) {
-      newMessageChannels.forEach(ch => {
+      newMessageChannels.forEach((ch) => {
         const badge = ch.newMessageCount ? ` [${ch.newMessageCount} new]` : ''
         displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}${badge}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
@@ -336,9 +339,11 @@ function buildInboxFromArchive(
   }
 
   if (followingChannels.length > 0) {
-    displayItems.push(`══════ ${collapseIndicator('following')} ★ FOLLOWING (${followingChannels.length}) ══════`)
+    displayItems.push(
+      `══════ ${collapseIndicator('following')} ★ FOLLOWING (${followingChannels.length}) ══════`
+    )
     if (!isCollapsed('following')) {
-      followingChannels.forEach(ch => {
+      followingChannels.forEach((ch) => {
         displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
         channelList.push(ch)
@@ -348,9 +353,11 @@ function buildInboxFromArchive(
   }
 
   if (unfollowedChannels.length > 0) {
-    displayItems.push(`══════ ${collapseIndicator('unfollowed')} ○ UNFOLLOWED (${unfollowedChannels.length}) ══════`)
+    displayItems.push(
+      `══════ ${collapseIndicator('unfollowed')} ○ UNFOLLOWED (${unfollowedChannels.length}) ══════`
+    )
     if (!isCollapsed('unfollowed')) {
-      unfollowedChannels.forEach(ch => {
+      unfollowedChannels.forEach((ch) => {
         displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
         channelList.push(ch)
@@ -385,9 +392,7 @@ async function processChannelForInbox(
   if (!channelVisit) {
     try {
       const messages = await channel.messages.fetch({ limit: 5 })
-      const hasMention = Array.from(messages.values()).some(
-        (msg) => msg.mentions.users.has(botUserId)
-      )
+      const hasMention = Array.from(messages.values()).some((msg) => msg.mentions.users.has(botUserId))
       if (hasMention) {
         // Auto-follow if mentioned
         markChannelVisited(channel.id, undefined, 'discord')
@@ -411,10 +416,11 @@ async function processChannelForInbox(
       channelInfo.lastMessageTimestamp = newestMsg.date
 
       const cacheAgeMs = Date.now() - cached.fetchedAt
-      if (cacheAgeMs < 300_000) { // 5 min cache for inbox
+      if (cacheAgeMs < 300_000) {
+        // 5 min cache for inbox
         const lastVisitDate = new Date(channelVisit.lastVisited)
-        const newMessages = cached.messages.filter(msg =>
-          msg.date > lastVisitDate && msg.authorId !== botUserId
+        const newMessages = cached.messages.filter(
+          (msg) => msg.date > lastVisitDate && msg.authorId !== botUserId
         )
         if (newMessages.length > 0) {
           channelInfo.group = 'new'
@@ -435,8 +441,8 @@ async function processChannelForInbox(
     }
 
     const lastVisitDate = new Date(channelVisit.lastVisited)
-    const newMessages = messagesArray.filter(msg =>
-      new Date(msg.createdTimestamp) > lastVisitDate && msg.author.id !== botUserId
+    const newMessages = messagesArray.filter(
+      (msg) => new Date(msg.createdTimestamp) > lastVisitDate && msg.author.id !== botUserId
     )
 
     if (newMessages.length > 0) {
@@ -487,17 +493,21 @@ async function buildInboxChannels(
   for (let i = 0; i < channelsToProcess.length; i += BATCH_SIZE) {
     const batch = channelsToProcess.slice(i, i + BATCH_SIZE)
     const results = await Promise.all(
-      batch.map(({ channel, guildName }) =>
-        processChannelForInbox(channel, guildName, botUserId, visitData)
-      )
+      batch.map(({ channel, guildName }) => processChannelForInbox(channel, guildName, botUserId, visitData))
     )
 
     for (const channelInfo of results) {
       if (!channelInfo) continue
       switch (channelInfo.group) {
-        case 'new': newMessageChannels.push(channelInfo); break
-        case 'following': followingChannels.push(channelInfo); break
-        case 'unfollowed': unfollowedChannels.push(channelInfo); break
+        case 'new':
+          newMessageChannels.push(channelInfo)
+          break
+        case 'following':
+          followingChannels.push(channelInfo)
+          break
+        case 'unfollowed':
+          unfollowedChannels.push(channelInfo)
+          break
       }
     }
   }
@@ -519,12 +529,12 @@ async function buildInboxChannels(
   let channelIndex = 0
 
   const isCollapsed = (section: SectionName) => collapsedSections.has(section)
-  const collapseIndicator = (section: SectionName) => isCollapsed(section) ? '▶' : '▼'
-  
+  const collapseIndicator = (section: SectionName) => (isCollapsed(section) ? '▶' : '▼')
+
   if (newMessageChannels.length > 0) {
     displayItems.push(`══════ ${collapseIndicator('new')} 🆕 NEW (${newMessageChannels.length}) ══════`)
     if (!isCollapsed('new')) {
-      newMessageChannels.forEach(ch => {
+      newMessageChannels.forEach((ch) => {
         const badge = ch.newMessageCount ? ` [${ch.newMessageCount} new]` : ''
         displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}${badge}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
@@ -533,11 +543,13 @@ async function buildInboxChannels(
       })
     }
   }
-  
+
   if (followingChannels.length > 0) {
-    displayItems.push(`══════ ${collapseIndicator('following')} ★ FOLLOWING (${followingChannels.length}) ══════`)
+    displayItems.push(
+      `══════ ${collapseIndicator('following')} ★ FOLLOWING (${followingChannels.length}) ══════`
+    )
     if (!isCollapsed('following')) {
-      followingChannels.forEach(ch => {
+      followingChannels.forEach((ch) => {
         displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
         channelList.push(ch)
@@ -545,11 +557,13 @@ async function buildInboxChannels(
       })
     }
   }
-  
+
   if (unfollowedChannels.length > 0) {
-    displayItems.push(`══════ ${collapseIndicator('unfollowed')} ○ UNFOLLOWED (${unfollowedChannels.length}) ══════`)
+    displayItems.push(
+      `══════ ${collapseIndicator('unfollowed')} ○ UNFOLLOWED (${unfollowedChannels.length}) ══════`
+    )
     if (!isCollapsed('unfollowed')) {
-      unfollowedChannels.forEach(ch => {
+      unfollowedChannels.forEach((ch) => {
         displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
         channelList.push(ch)
@@ -593,7 +607,7 @@ async function main() {
 
         // Wait for archive to start and have some data
         console.log('⏳ Waiting for archive to initialize...')
-        initDB()
+        await initDB()
         const hasData = await waitForArchiveData(60000) // Wait up to 60 seconds
 
         if (!hasData) {
@@ -602,7 +616,7 @@ async function main() {
         }
       } else {
         console.log('📚 Archive service is running')
-        initDB()
+        await initDB()
       }
 
       // Connect to Discord for sending messages
@@ -615,7 +629,7 @@ async function main() {
 
       // Build inbox from archive
       console.log('📥 Loading inbox from archive...')
-      inboxData = buildInboxFromArchive(collapsedSections, botUserId)
+      inboxData = await buildInboxFromArchive(collapsedSections, botUserId)
     } else {
       // WhatsApp: connect live for everything
       console.log(`🔌 Connecting to ${selectedPlatform}...`)
@@ -628,7 +642,7 @@ async function main() {
       // Auto-follow any new channels created while app was closed
       const allChannels = await platformClient.getChannels()
       const newlyFollowed = autoFollowNewChannels(
-        allChannels.map(ch => ({ id: ch.id, name: ch.name })),
+        allChannels.map((ch) => ({ id: ch.id, name: ch.name })),
         selectedPlatform
       )
       if (newlyFollowed.length > 0) {
@@ -637,7 +651,7 @@ async function main() {
 
       inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
     }
-    
+
     if (inboxData.channels.length === 0 && inboxData.displayItems.length === 0) {
       console.log('❌ No accessible channels found')
       if (platformClient) await platformClient.disconnect()
@@ -665,7 +679,7 @@ async function main() {
     // Refresh callback - rebuilds channel list
     const onRefreshChannels = async () => {
       if (selectedPlatform === 'discord') {
-        inboxData = buildInboxFromArchive(collapsedSections, botUserId)
+        inboxData = await buildInboxFromArchive(collapsedSections, botUserId)
       } else if (platformClient) {
         inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
       }
@@ -680,7 +694,7 @@ async function main() {
         collapsedSections.add(section)
       }
       if (selectedPlatform === 'discord') {
-        inboxData = buildInboxFromArchive(collapsedSections, botUserId)
+        inboxData = await buildInboxFromArchive(collapsedSections, botUserId)
       } else if (platformClient) {
         inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
       }
@@ -691,7 +705,7 @@ async function main() {
     const onFollowChannel = async (channel: ChannelInfo) => {
       markChannelVisited(channel.id, undefined, selectedPlatform)
       if (selectedPlatform === 'discord') {
-        inboxData = buildInboxFromArchive(collapsedSections, botUserId)
+        inboxData = await buildInboxFromArchive(collapsedSections, botUserId)
       } else if (platformClient) {
         inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
       }
@@ -702,7 +716,7 @@ async function main() {
     const onUnfollowChannel = async (channel: ChannelInfo) => {
       removeChannelVisit(channel.id, selectedPlatform)
       if (selectedPlatform === 'discord') {
-        inboxData = buildInboxFromArchive(collapsedSections, botUserId)
+        inboxData = await buildInboxFromArchive(collapsedSections, botUserId)
       } else if (platformClient) {
         inboxData = await buildWhatsAppInbox(platformClient, collapsedSections)
       }
@@ -723,7 +737,7 @@ async function main() {
       onToggleSection,
       onExit: async () => {
         if (platformClient) await platformClient.disconnect()
-      }
+      },
     })
 
     await waitUntilExit()

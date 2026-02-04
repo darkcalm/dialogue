@@ -3,18 +3,8 @@
  * Shows known channels, visit data, cache stats, and message archive status
  */
 
-import {
-  loadVisitData,
-  loadKnownChannels,
-} from './shared'
-import {
-  initDB,
-  closeDB,
-  getTotalStats,
-  getChannelStats,
-  getDBPath,
-} from './db'
-import * as fs from 'fs'
+import { loadVisitData, loadKnownChannels } from './shared'
+import { initDB, closeDB, getTotalStats, getChannelStats, getDBPath } from './db'
 
 // Format relative time
 function formatRelativeTime(dateStr: string): string {
@@ -32,7 +22,7 @@ function formatRelativeTime(dateStr: string): string {
   return date.toLocaleDateString()
 }
 
-function main() {
+async function main() {
   console.log('\n📊 Dialogue Known Data\n')
 
   const knownChannels = loadKnownChannels()
@@ -60,10 +50,10 @@ function main() {
   // Also add followed channels not in known list (backwards compat)
   for (const [key, visit] of Object.entries(visitData)) {
     if (seenIds.has(key)) continue
-    
+
     const [platform, ...idParts] = key.split(':')
     if (!platform || idParts.length === 0) continue // Skip old unprefixed keys
-    
+
     const id = idParts.join(':')
     const entry = { id, name: id, firstSeen: null, visitKey: key }
 
@@ -134,25 +124,26 @@ function main() {
   console.log()
 
   // Message Archive Stats
-  displayArchiveStats()
+  await displayArchiveStats()
 }
 
-function displayArchiveStats(): void {
+async function displayArchiveStats(): Promise<void> {
   const dbPath = getDBPath()
 
-  // Check if database exists
-  if (!fs.existsSync(dbPath)) {
+  // For Turso, dbPath is a URL - we can't check if it "exists" the same way
+  // Just try to connect and query
+  if (dbPath === '(not configured)') {
     console.log('══════ Message Archive ══════')
-    console.log('  No messages archived yet.')
-    console.log('  Run "npm run archive" to start archiving messages.')
+    console.log('  No database configured.')
+    console.log('  Set TURSO_DB_URL and TURSO_AUTH_TOKEN to enable archiving.')
     console.log()
     return
   }
 
   try {
-    initDB()
-    const totalStats = getTotalStats()
-    const channelStats = getChannelStats()
+    await initDB()
+    const totalStats = await getTotalStats()
+    const channelStats = await getChannelStats()
 
     console.log('══════ Message Archive ══════')
     console.log(`  Database: ${dbPath}`)
@@ -183,6 +174,9 @@ function displayArchiveStats(): void {
   } catch (error) {
     console.log('══════ Message Archive ══════')
     console.log('  Error reading archive database.')
+    if (error instanceof Error) {
+      console.log(`  ${error.message}`)
+    }
     console.log()
   }
 }
