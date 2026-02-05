@@ -1,4 +1,4 @@
-import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js'
+import { ChatInputCommandInteraction, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js'
 import { SlashCommandBuilder } from '@discordjs/builders'
 import {
   initLinksDB,
@@ -9,6 +9,9 @@ import {
 } from '@/cli/links-db'
 import { initDBWithCache, hasLocalCache } from '@/cli/local-cache'
 import { enableLocalCacheMode } from '@/cli/db'
+
+// Store search results for pagination
+const searchCache = new Map<string, { links: any[]; urlPattern?: string; channelFilter?: string }>()
 
 export const data = new SlashCommandBuilder()
   .setName('links')
@@ -77,6 +80,64 @@ async function ensureReady(): Promise<string | null> {
   } catch (err) {
     return `Failed to initialize: ${err instanceof Error ? err.message : 'Unknown error'}`
   }
+}
+
+function createSearchEmbed(links: any[], page: number, pageSize: number, total: number, urlPattern?: string, channelFilter?: string) {
+  const start = (page - 1) * pageSize
+  const end = start + pageSize
+  const pageLinks = links.slice(start, end)
+  const totalPages = Math.ceil(total / pageSize)
+
+  let title = `🔍 ${total} Link${total === 1 ? '' : 's'}`
+  if (urlPattern && channelFilter) {
+    title += ` (URL: "${urlPattern}", Channel: "${channelFilter}")`
+  } else if (urlPattern) {
+    title += ` (URL: "${urlPattern}")`
+  } else if (channelFilter) {
+    title += ` (Channel: "${channelFilter}")`
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setColor(0x57f287)
+    .setFooter({ text: `Page ${page} of ${totalPages}` })
+
+  const description = pageLinks
+    .map((link) => {
+      const date = new Date(link.timestamp).toLocaleDateString()
+      const channel = link.channelName || 'unknown'
+      const truncatedUrl = link.url.length > 60 ? link.url.substring(0, 57) + '...' : link.url
+      return `**${link.authorName}** in #${channel} (${date})\n🔗 ${truncatedUrl}`
+    })
+    .join('\n\n')
+
+  embed.setDescription(description.substring(0, 4096))
+
+  return { embed, totalPages }
+}
+
+function createPaginationButtons(page: number, totalPages: number, cacheKey: string) {
+  const row = new ActionRowBuilder<ButtonBuilder>()
+
+  if (page > 1) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`links_prev_${cacheKey}_${page}`)
+        .setLabel('← Previous')
+        .setStyle(ButtonStyle.Primary)
+    )
+  }
+
+  if (page < totalPages) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`links_next_${cacheKey}_${page}`)
+        .setLabel('Next →')
+        .setStyle(ButtonStyle.Primary)
+    )
+  }
+
+  return row
 }
 
 export async function execute(interaction: ChatInputCommandInteraction) {
@@ -169,7 +230,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
         const urlPattern = interaction.options.getString('url')
         const channelFilter = interaction.options.getString('channel')
-        const count = interaction.options.getInteger('count') || 10
+        const pageSize = interaction.options.getInteger('count') || 10
+
+        console.log(`🔍 Search: url="${urlPattern}", channel="${channelFilter}", pageSize=${pageSize}`)
 
         // Require at least one filter
         if (!urlPattern && !channelFilter) {
@@ -181,7 +244,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         const links = await getLinks({
           urlPattern: urlPattern || undefined,
           channelPattern: channelFilter || undefined,
-          limit: count
+          limit: 1000 // Get all results for pagination
         })
 
         if (links.length === 0) {
@@ -196,32 +259,17 @@ export async function execute(interaction: ChatInputCommandInteraction) {
           return interaction.editReply(msg)
         }
 
-        let title = `🔍 ${links.length} Link${links.length === 1 ? '' : 's'}`
-        if (urlPattern && channelFilter) {
-          title += ` (URL: "${urlPattern}", Channel: "${channelFilter}")`
-        } else if (urlPattern) {
-          title += ` (URL: "${urlPattern}")`
-        } else if (channelFilter) {
-          title += ` (Channel: "${channelFilter}")`
-        }
+        // Cache results for pagination
+        const cacheKey = `${interaction.user.id}_${interaction.id}`
+        searchCache.set(cacheKey, { links, urlPattern: urlPattern || undefined, channelFilter: channelFilter || undefined })
 
-        const embed = new EmbedBuilder()
-          .setTitle(title)
-          .setColor(0x57f287)
+        const { embed, totalPages } = createSearchEmbed(links, 1, pageSize, links.length, urlPattern || undefined, channelFilter || undefined)
+        const buttons = createPaginationButtons(1, totalPages, cacheKey)
 
-        const description = links
-          .map((link) => {
-            const date = new Date(link.timestamp).toLocaleDateString()
-            const channel = link.channelName || 'unknown'
-            const truncatedUrl =
-              link.url.length > 60 ? link.url.substring(0, 57) + '...' : link.url
-            return `**${link.authorName}** in #${channel} (${date})\n🔗 ${truncatedUrl}`
-          })
-          .join('\n\n')
-
-        embed.setDescription(description.substring(0, 4096))
-
-        return interaction.editReply({ embeds: [embed] })
+        return interaction.editReply({
+          embeds: [embed],
+          components: totalPages > 1 ? [buttons] : []
+        })
       }
 
       case 'sync': {
@@ -246,5 +294,40 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     return interaction.editReply(
       `❌ Error: ${err instanceof Error ? err.message : 'Unknown error'}`
     )
+  }
+}
+
+// Handle button interactions for pagination
+export async function handleButton(interaction: any) {
+  if (!interaction.customId.startsWith('links_')) return
+
+  try {
+    const [, action, cacheKey, currentPage] = interaction.customId.split('_')
+    const page = parseInt(currentPage)
+    const nextPage = action === 'next' ? page + 1 : page - 1
+
+    const cached = searchCache.get(cacheKey)
+    if (!cached) {
+      return interaction.reply({ content: '❌ Search cache expired. Run the search again.', ephemeral: true })
+    }
+
+    const pageSize = 10
+    const { embed, totalPages } = createSearchEmbed(
+      cached.links,
+      nextPage,
+      pageSize,
+      cached.links.length,
+      cached.urlPattern,
+      cached.channelFilter
+    )
+    const buttons = createPaginationButtons(nextPage, totalPages, cacheKey)
+
+    await interaction.update({
+      embeds: [embed],
+      components: totalPages > 1 ? [buttons] : []
+    })
+  } catch (err) {
+    console.error('Button interaction error:', err)
+    interaction.reply({ content: '❌ Error handling pagination', ephemeral: true })
   }
 }

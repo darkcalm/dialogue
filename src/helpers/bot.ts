@@ -21,12 +21,23 @@ export async function startBot() {
     )
   })
 
-  client.on('interactionCreate', (interaction) => {
+  client.on('interactionCreate', async (interaction) => {
+    if (interaction.isButton()) {
+      // Handle button interactions for pagination
+      if (interaction.customId.startsWith('links_')) {
+        const linksCommand = commands['links']
+        if (linksCommand?.handleButton) {
+          await linksCommand.handleButton(interaction)
+        }
+      }
+      return
+    }
+
     if (!interaction.isCommand()) return
 
     const { commandName } = interaction
     if (commands[commandName])
-      commands[commandName].execute(interaction, client)
+      await commands[commandName].execute(interaction, client)
   })
 
   await client.login(config.DISCORD_BOT_TOKEN)
