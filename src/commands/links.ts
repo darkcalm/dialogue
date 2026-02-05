@@ -1,4 +1,4 @@
-import { ChatInputCommandInteraction, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } from 'discord.js'
+import { ChatInputCommandInteraction, EmbedBuilder, AttachmentBuilder } from 'discord.js'
 import { SlashCommandBuilder } from '@discordjs/builders'
 import {
   initLinksDB,
@@ -9,9 +9,6 @@ import {
 } from '@/cli/links-db'
 import { initDBWithCache, hasLocalCache } from '@/cli/local-cache'
 import { enableLocalCacheMode } from '@/cli/db'
-
-// Store search results for copy functionality
-const searchCache = new Map<string, string>()
 
 export const data = new SlashCommandBuilder()
   .setName('links')
@@ -93,16 +90,7 @@ function generateLinksText(links: any[]): string {
     .join('\n')
 }
 
-function createActionButtons(cacheKey: string) {
-  const row = new ActionRowBuilder<ButtonBuilder>()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId(`links_copy_${cacheKey}`)
-        .setLabel('📋 Copy Links')
-        .setStyle(ButtonStyle.Secondary)
-    )
-  return row
-}
+
 
 export async function execute(interaction: ChatInputCommandInteraction) {
   const subcommand = interaction.options.getSubcommand()
@@ -226,10 +214,6 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         const linksText = generateLinksText(links)
         const file = new AttachmentBuilder(Buffer.from(linksText, 'utf-8'), { name: 'links.txt' })
 
-        // Cache for copy button
-        const cacheKey = `${interaction.user.id}_${urlPattern || ''}_${channelFilter || ''}`
-        searchCache.set(cacheKey, linksText)
-
         // Create summary embed
         let title = `🔍 Found ${links.length} Link${links.length === 1 ? '' : 's'}`
         if (urlPattern && channelFilter) {
@@ -243,14 +227,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         const embed = new EmbedBuilder()
           .setTitle(title)
           .setColor(0x57f287)
-          .setDescription(`📥 Download **links.txt** below or use the Copy button`)
-
-        const buttons = createActionButtons(cacheKey)
+          .setDescription(`📥 Download **links.txt** below`)
 
         return interaction.editReply({
           embeds: [embed],
-          files: [file],
-          components: [buttons]
+          files: [file]
         })
       }
 
@@ -279,31 +260,4 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   }
 }
 
-// Handle button interactions for copy
-export async function handleButton(interaction: any) {
-  if (!interaction.customId.startsWith('links_copy_')) return
 
-  try {
-    const cacheKey = interaction.customId.replace('links_copy_', '')
-    const linksText = searchCache.get(cacheKey)
-
-    if (!linksText) {
-      return interaction.reply({ content: '❌ Search cache expired. Run the search again.', ephemeral: true })
-    }
-
-    // Create code block with the links
-    const codeBlock = '```\n' + linksText + '\n```'
-    const maxLength = 2000
-
-    if (codeBlock.length > maxLength) {
-      // Too long for a message, send as file instead
-      const file = new AttachmentBuilder(Buffer.from(linksText, 'utf-8'), { name: 'links.txt' })
-      return interaction.reply({ files: [file], ephemeral: true })
-    }
-
-    interaction.reply({ content: codeBlock, ephemeral: true })
-  } catch (err) {
-    console.error('Button interaction error:', err)
-    interaction.reply({ content: '❌ Error copying links', ephemeral: true })
-  }
-}
