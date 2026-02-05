@@ -17,6 +17,7 @@ import {
   saveMessages,
   getOldestMessageId,
   getChannelsWithMessages,
+  getChannelsWithMessagesAfter,
   updateChannelOldestFetched,
   getChannelBackfillStatus,
   getTotalStats,
@@ -41,6 +42,7 @@ const MAX_DELAY_MS = 8000 // 8 seconds maximum between fetches
 
 // Lock file to indicate archive is running
 const ARCHIVE_LOCK_FILE = path.join(os.homedir(), '.dialogue-archive.lock')
+const ARCHIVE_TIMESTAMP_FILE = path.join(os.homedir(), '.dialogue-archive-timestamp.txt')
 
 // State
 let isRunning = true
@@ -82,6 +84,30 @@ function isArchiveRunning(): boolean {
       fs.unlinkSync(ARCHIVE_LOCK_FILE)
     }
     return false
+  }
+}
+
+/**
+ * Get last archive shutdown timestamp
+ */
+function getLastArchiveTimestamp(): Date | null {
+  try {
+    if (!fs.existsSync(ARCHIVE_TIMESTAMP_FILE)) return null
+    const timestamp = fs.readFileSync(ARCHIVE_TIMESTAMP_FILE, 'utf-8').trim()
+    return new Date(timestamp)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Save current timestamp (called on shutdown)
+ */
+function saveArchiveTimestamp(): void {
+  try {
+    fs.writeFileSync(ARCHIVE_TIMESTAMP_FILE, new Date().toISOString())
+  } catch {
+    // Ignore errors
   }
 }
 
@@ -204,14 +230,27 @@ async function backfillChannel(client: DiscordPlatformClient, channel: IPlatform
  * For each channel with existing messages, fetch recent messages and save any new ones
  */
 async function catchUpMissedMessages(client: DiscordPlatformClient, channels: IPlatformChannel[]): Promise<void> {
-  const channelsWithMessages = await getChannelsWithMessages()
+  // Try to get last archive timestamp for efficient catch-up
+  const lastTimestamp = getLastArchiveTimestamp()
+  let channelsWithMessages: string[]
 
-  if (channelsWithMessages.length === 0) {
-    log('No existing messages - skipping catch-up phase')
-    return
+  if (lastTimestamp) {
+    // Efficient path: only catch up on channels with activity since last run
+    const hoursSinceLastRun = (Date.now() - lastTimestamp.getTime()) / (1000 * 60 * 60)
+    log(`Last archive run: ${lastTimestamp.toISOString()} (${hoursSinceLastRun.toFixed(1)}h ago)`)
+
+    channelsWithMessages = await getChannelsWithMessagesAfter(lastTimestamp.toISOString())
+    log(`Found ${channelsWithMessages.length} channels with recent activity`)
+  } else {
+    // Fallback: catch up on all channels with messages
+    channelsWithMessages = await getChannelsWithMessages()
+    log(`No last run timestamp - catching up on all ${channelsWithMessages.length} channels`)
   }
 
-  log(`Catching up on ${channelsWithMessages.length} channels...`)
+  if (channelsWithMessages.length === 0) {
+    log('No channels need catch-up - skipping catch-up phase')
+    return
+  }
 
   const channelMap = new Map(channels.map((ch) => [ch.id, ch]))
   let totalNewMessages = 0
@@ -379,6 +418,9 @@ function setupShutdownHandlers(): void {
   const shutdown = async () => {
     log('Shutting down...')
     isRunning = false
+
+    // Save timestamp for efficient catch-up on next run
+    saveArchiveTimestamp()
 
     // Remove lock file
     removeLockFile()

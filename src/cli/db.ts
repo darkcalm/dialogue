@@ -452,6 +452,19 @@ export async function getChannelsWithMessages(): Promise<string[]> {
 }
 
 /**
+ * Get channels that have messages after a certain timestamp
+ * Used for efficient catch-up after archive downtime
+ */
+export async function getChannelsWithMessagesAfter(timestamp: string): Promise<string[]> {
+  const db = getClient()
+  const result = await db.execute({
+    sql: `SELECT DISTINCT channel_id FROM messages WHERE timestamp > ? ORDER BY timestamp DESC`,
+    args: [timestamp]
+  })
+  return result.rows.map((r) => r.channel_id as string)
+}
+
+/**
  * Update the oldest fetched message ID for a channel
  */
 export async function updateChannelOldestFetched(channelId: string, messageId: string | null): Promise<void> {
