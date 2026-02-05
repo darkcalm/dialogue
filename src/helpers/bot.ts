@@ -22,22 +22,32 @@ export async function startBot() {
   })
 
   client.on('interactionCreate', async (interaction) => {
-    if (interaction.isButton()) {
-      // Handle button interactions for pagination
-      if (interaction.customId.startsWith('links_')) {
-        const linksCommand = commands['links']
-        if (linksCommand?.handleButton) {
-          await linksCommand.handleButton(interaction)
+    try {
+      if (interaction.isButton()) {
+        // Handle button interactions for pagination
+        if (interaction.customId.startsWith('links_')) {
+          const linksCommand = commands['links']
+          if (linksCommand?.handleButton) {
+            await linksCommand.handleButton(interaction)
+          }
         }
+        return
       }
-      return
+
+      if (!interaction.isCommand()) return
+
+      const { commandName } = interaction
+      if (commands[commandName]) {
+        await commands[commandName].execute(interaction, client)
+      }
+    } catch (err) {
+      console.error('Interaction error:', err)
+      if (interaction.isRepliable()) {
+        try {
+          await interaction.reply({ content: '❌ An error occurred', ephemeral: true })
+        } catch {}
+      }
     }
-
-    if (!interaction.isCommand()) return
-
-    const { commandName } = interaction
-    if (commands[commandName])
-      await commands[commandName].execute(interaction, client)
   })
 
   await client.login(config.DISCORD_BOT_TOKEN)

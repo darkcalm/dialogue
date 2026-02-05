@@ -259,8 +259,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
           return interaction.editReply(msg)
         }
 
-        // Cache results for pagination
-        const cacheKey = `${interaction.user.id}_${interaction.id}`
+        // Cache results for pagination - use stable key based on user + search params
+        const cacheKey = `${interaction.user.id}_${urlPattern || ''}_${channelFilter || ''}`
         searchCache.set(cacheKey, { links, urlPattern: urlPattern || undefined, channelFilter: channelFilter || undefined })
 
         const { embed, totalPages } = createSearchEmbed(links, 1, pageSize, links.length, urlPattern || undefined, channelFilter || undefined)
