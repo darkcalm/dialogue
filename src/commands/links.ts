@@ -38,12 +38,12 @@ export const data = new SlashCommandBuilder()
   .addSubcommand((subcommand) =>
     subcommand
       .setName('search')
-      .setDescription('Search for links by URL pattern')
+      .setDescription('Search for links by URL text or channel')
       .addStringOption((option) =>
         option
-          .setName('pattern')
-          .setDescription('URL pattern to search for (e.g., "youtube", "github.com")')
-          .setRequired(true)
+          .setName('url')
+          .setDescription('Text to search for within URLs (e.g., "youtube", "github.com")')
+          .setRequired(false)
       )
       .addStringOption((option) =>
         option
@@ -167,25 +167,43 @@ export async function execute(interaction: ChatInputCommandInteraction) {
           )
         }
 
-        const pattern = interaction.options.getString('pattern', true)
+        const urlPattern = interaction.options.getString('url')
         const channelFilter = interaction.options.getString('channel')
         const count = interaction.options.getInteger('count') || 10
-        const links = await getLinks({ 
-          urlPattern: pattern, 
+
+        // Require at least one filter
+        if (!urlPattern && !channelFilter) {
+          return interaction.editReply(
+            '❌ Please provide at least one filter: `url` or `channel`'
+          )
+        }
+
+        const links = await getLinks({
+          urlPattern: urlPattern || undefined,
           channelPattern: channelFilter || undefined,
-          limit: count 
+          limit: count
         })
 
         if (links.length === 0) {
-          const msg = channelFilter 
-            ? `No links found matching "${pattern}" in channels matching "${channelFilter}".`
-            : `No links found matching "${pattern}".`
+          let msg = 'No links found'
+          if (urlPattern && channelFilter) {
+            msg += ` with URLs matching "${urlPattern}" in channels matching "${channelFilter}".`
+          } else if (urlPattern) {
+            msg += ` with URLs matching "${urlPattern}".`
+          } else if (channelFilter) {
+            msg += ` in channels matching "${channelFilter}".`
+          }
           return interaction.editReply(msg)
         }
 
-        const title = channelFilter
-          ? `🔍 ${links.length} Links matching "${pattern}" in "${channelFilter}"`
-          : `🔍 ${links.length} Links matching "${pattern}"`
+        let title = `🔍 ${links.length} Link${links.length === 1 ? '' : 's'}`
+        if (urlPattern && channelFilter) {
+          title += ` (URL: "${urlPattern}", Channel: "${channelFilter}")`
+        } else if (urlPattern) {
+          title += ` (URL: "${urlPattern}")`
+        } else if (channelFilter) {
+          title += ` (Channel: "${channelFilter}")`
+        }
 
         const embed = new EmbedBuilder()
           .setTitle(title)

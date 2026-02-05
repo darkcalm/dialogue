@@ -469,10 +469,25 @@ export async function refillTimeRange(
 /**
  * Show archive status and exit
  */
-async function showStatus(): Promise<void> {
+async function showStatus(searchTerm?: string, threadsOnly: boolean = false): Promise<void> {
   await initDB()
   const stats = await getTotalStats()
-  const channelStats = await getChannelStats()
+  let channelStats = await getChannelStats()
+
+  // Filter by search term if provided
+  if (searchTerm) {
+    const lowerSearch = searchTerm.toLowerCase()
+    channelStats = channelStats.filter(ch =>
+      ch.name.toLowerCase().includes(lowerSearch)
+    )
+  }
+
+  // Filter to threads only if requested
+  if (threadsOnly) {
+    channelStats = channelStats.filter(ch =>
+      ch.type && (ch.type.includes('THREAD') || ch.type.includes('Thread'))
+    )
+  }
 
   console.log('\nArchive Status\n')
   console.log(`Total messages: ${stats.totalMessages.toLocaleString()}`)
@@ -481,14 +496,25 @@ async function showStatus(): Promise<void> {
   console.log(`Running: ${isArchiveRunning() ? 'yes (PID ' + fs.readFileSync(ARCHIVE_LOCK_FILE, 'utf-8').trim() + ')' : 'no'}`)
 
   if (channelStats.length > 0) {
-    console.log('\nChannels:')
-    for (const ch of channelStats.slice(0, 20)) {
+    const displayLimit = searchTerm ? channelStats.length : 20
+    const title = searchTerm
+      ? `\nChannels matching "${searchTerm}" (${channelStats.length} found):`
+      : '\nChannels:'
+    console.log(title)
+
+    for (const ch of channelStats.slice(0, displayLimit)) {
       const status = ch.backfillComplete ? '✓' : '…'
-      console.log(`  ${status} #${ch.name}: ${ch.messageCount.toLocaleString()} messages`)
+      const isThread = ch.type && (ch.type.includes('THREAD') || ch.type.includes('Thread'))
+      const prefix = isThread ? '🧵' : '#'
+      console.log(`  ${status} ${prefix}${ch.name}: ${ch.messageCount.toLocaleString()} messages`)
     }
-    if (channelStats.length > 20) {
+
+    if (!searchTerm && channelStats.length > 20) {
       console.log(`  ... and ${channelStats.length - 20} more`)
+      console.log(`\nTip: Use --status=<search> to filter channels (e.g., --status=crypto)`)
     }
+  } else if (searchTerm) {
+    console.log(`\nNo channels found matching "${searchTerm}"`)
   }
 
   closeDB()
@@ -587,9 +613,13 @@ async function runRefill(durationStr: string = '12h'): Promise<void> {
  * Main entry point
  */
 async function main(): Promise<void> {
-  // Handle --status flag
-  if (process.argv.includes('--status')) {
-    await showStatus()
+  // Handle --status flag (with optional search term)
+  const statusArg = process.argv.find((arg) => arg.startsWith('--status'))
+  if (statusArg) {
+    // Parse optional search: --status or --status=crypto
+    const searchTerm = statusArg.includes('=') ? statusArg.split('=')[1] : undefined
+    const threadsOnly = process.argv.includes('--threads')
+    await showStatus(searchTerm, threadsOnly)
     process.exit(0)
   }
 

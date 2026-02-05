@@ -95,6 +95,31 @@ export class DiscordPlatformClient implements IPlatformClient {
       for (const channel of guildChannels.values()) {
         if (channel && (channel instanceof TextChannel || channel instanceof ThreadChannel)) {
           channels.push(adaptDiscordChannel(channel))
+
+          // For text channels, also fetch their threads (active and archived)
+          if (channel instanceof TextChannel) {
+            try {
+              // Fetch active threads
+              const activeThreads = await channel.threads.fetchActive()
+              for (const thread of activeThreads.threads.values()) {
+                channels.push(adaptDiscordChannel(thread))
+              }
+
+              // Fetch archived threads (public and private)
+              const archivedPublic = await channel.threads.fetchArchived({ type: 'public' })
+              for (const thread of archivedPublic.threads.values()) {
+                channels.push(adaptDiscordChannel(thread))
+              }
+
+              const archivedPrivate = await channel.threads.fetchArchived({ type: 'private' })
+              for (const thread of archivedPrivate.threads.values()) {
+                channels.push(adaptDiscordChannel(thread))
+              }
+            } catch (error) {
+              // Thread fetching may fail for channels without thread permissions
+              console.error(`Error fetching threads for channel ${channel.name}:`, error)
+            }
+          }
         }
       }
     }
@@ -118,6 +143,40 @@ export class DiscordPlatformClient implements IPlatformClient {
       return null
     } catch {
       return null
+    }
+  }
+
+  async getThreadsForChannel(channelId: string): Promise<IPlatformChannel[]> {
+    const threads: IPlatformChannel[] = []
+
+    try {
+      const channel = await this.client.channels.fetch(channelId)
+      if (!channel || !(channel instanceof TextChannel)) {
+        return []
+      }
+
+      // Fetch active threads
+      const activeThreads = await channel.threads.fetchActive()
+      for (const thread of activeThreads.threads.values()) {
+        threads.push(adaptDiscordChannel(thread))
+      }
+
+      // Fetch archived threads (public)
+      const archivedPublic = await channel.threads.fetchArchived({ type: 'public' })
+      for (const thread of archivedPublic.threads.values()) {
+        threads.push(adaptDiscordChannel(thread))
+      }
+
+      // Fetch archived threads (private)
+      const archivedPrivate = await channel.threads.fetchArchived({ type: 'private' })
+      for (const thread of archivedPrivate.threads.values()) {
+        threads.push(adaptDiscordChannel(thread))
+      }
+
+      return threads
+    } catch (error) {
+      console.error(`Error fetching threads for channel ${channelId}:`, error)
+      return []
     }
   }
 

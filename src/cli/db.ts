@@ -447,6 +447,8 @@ export interface ChannelStats {
   oldestMessageDate: string | null
   newestMessageDate: string | null
   backfillComplete: boolean
+  type: string | null
+  parentId: string | null
 }
 
 /**
@@ -460,6 +462,8 @@ export async function getChannelStats(): Promise<ChannelStats[]> {
       c.name,
       c.guild_name as guildName,
       c.oldest_fetched_id,
+      c.type,
+      c.parent_id as parentId,
       COUNT(m.id) as messageCount,
       MIN(m.timestamp) as oldestMessageDate,
       MAX(m.timestamp) as newestMessageDate
@@ -477,6 +481,8 @@ export async function getChannelStats(): Promise<ChannelStats[]> {
     oldestMessageDate: row.oldestMessageDate as string | null,
     newestMessageDate: row.newestMessageDate as string | null,
     backfillComplete: row.oldest_fetched_id === 'COMPLETE',
+    type: row.type as string | null,
+    parentId: row.parentId as string | null,
   }))
 }
 
