@@ -190,8 +190,20 @@ export async function initDB(): Promise<void> {
     )
   `)
 
+  // Create channel events table for efficient refill queries
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS channel_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      timestamp TEXT NOT NULL
+    )
+  `)
+
   // Create indexes
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id)`)
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_channel_events_timestamp ON channel_events(timestamp)`)
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_channel_events_channel_time ON channel_events(channel_id, timestamp)`)
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)`)
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_channel_timestamp ON messages(channel_id, timestamp)`)
 }
@@ -290,6 +302,32 @@ export interface MessageRecord {
 }
 
 /**
+ * Log a channel event for efficient refill queries
+ * Events are only logged in dual-write mode (live archiving)
+ */
+async function logChannelEvent(channelId: string, eventType: 'message' | 'update' | 'delete', timestamp: string): Promise<void> {
+  // Only log events during live archiving (dual-write mode), not during backfill
+  if (!useDualWrite) return
+
+  const statement = {
+    sql: `INSERT INTO channel_events (channel_id, event_type, timestamp) VALUES (?, ?, ?)`,
+    args: [channelId, eventType, timestamp]
+  }
+
+  try {
+    // Log to both Turso and local cache
+    if (client) {
+      await client.execute(statement).catch(() => {}) // Ignore errors
+    }
+    if (cacheClient) {
+      await cacheClient.execute(statement).catch(() => {}) // Ignore errors
+    }
+  } catch {
+    // Event logging is best-effort, don't fail on errors
+  }
+}
+
+/**
  * Save or update a message in the database
  */
 export async function saveMessage(msg: MessageRecord): Promise<void> {
@@ -330,6 +368,9 @@ export async function saveMessage(msg: MessageRecord): Promise<void> {
     const db = getClient()
     await db.execute(statement)
   }
+
+  // Log channel event for efficient refill queries
+  await logChannelEvent(msg.channelId, 'message', msg.timestamp)
 }
 
 /**
@@ -849,4 +890,33 @@ export async function getMessageIdsInTimeRange(
     newest: (row?.newest as string) || null,
     count: Number(row?.count) || 0,
   }
+}
+
+/**
+ * Get channels that had activity in a time range (via event log)
+ * Falls back to scanning all messages if event log is empty
+ */
+export async function getChannelsWithActivityInTimeRange(
+  startTime: string,
+  endTime: string
+): Promise<string[]> {
+  const db = getClient()
+
+  // First try using the event log (much faster)
+  const eventResult = await db.execute({
+    sql: `SELECT DISTINCT channel_id FROM channel_events WHERE timestamp >= ? AND timestamp <= ?`,
+    args: [startTime, endTime],
+  })
+
+  if (eventResult.rows.length > 0) {
+    return eventResult.rows.map(row => row.channel_id as string)
+  }
+
+  // Fallback: scan messages table (slower, but works if event log is empty)
+  const messageResult = await db.execute({
+    sql: `SELECT DISTINCT channel_id FROM messages WHERE timestamp >= ? AND timestamp <= ?`,
+    args: [startTime, endTime],
+  })
+
+  return messageResult.rows.map(row => row.channel_id as string)
 }

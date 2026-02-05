@@ -6,6 +6,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import { spawn } from 'child_process'
 import { DiscordPlatformClient } from '@/platforms/discord/client'
 import { IPlatformMessage, IPlatformChannel } from '@/platforms/types'
 import {
@@ -26,6 +27,7 @@ import {
   deleteMessage,
   deleteMessagesInTimeRange,
   getMessageIdsInTimeRange,
+  getChannelsWithActivityInTimeRange,
   MessageRecord,
   ChannelRecord,
   enableDualWriteMode,
@@ -566,28 +568,61 @@ async function runRefill(durationStr: string = '12h'): Promise<void> {
     await refillClient.connect()
     log('Connected to Discord!')
 
-    // Get all channels
-    const channels = await refillClient.getChannels()
-    log(`Found ${channels.length} channels to refill`)
+    // Enable dual-write mode for real-time event handling
+    enableDualWriteMode()
+
+    // Set up real-time handlers to capture new messages during refill
+    log('Setting up real-time message handlers...')
+    setupRealtimeHandlers(refillClient)
+    log('Real-time handlers active - new messages will be captured during refill')
+
+    // Get channels with activity in the time range (using event log for efficiency)
+    log('Querying for channels with activity in time range...')
+    const activeChannelIds = await getChannelsWithActivityInTimeRange(
+      startTime.toISOString(),
+      endTime.toISOString()
+    )
+
+    if (activeChannelIds.length === 0) {
+      log('No channels had activity in the time range - refill complete!')
+      await refillClient.disconnect()
+      closeDB()
+      return
+    }
+
+    log(`Found ${activeChannelIds.length} channels with activity (skipping ${(await refillClient.getChannels()).length - activeChannelIds.length} inactive channels)`)
+
+    // Get channel details for logging
+    const allChannels = await refillClient.getChannels()
+    const channelMap = new Map(allChannels.map(ch => [ch.id, ch]))
 
     let totalDeleted = 0
     let totalFetched = 0
+    let processedCount = 0
 
-    for (const channel of channels) {
+    for (const channelId of activeChannelIds) {
       if (!isRunning) break
+
+      processedCount++
+      const channel = channelMap.get(channelId)
+      const channelName = channel?.name || channelId
 
       try {
         const result = await refillTimeRange(
           refillClient,
-          channel.id,
+          channelId,
           startTime.toISOString(),
           endTime.toISOString()
         )
         totalDeleted += result.deleted
         totalFetched += result.fetched
+
+        if (processedCount % 10 === 0) {
+          log(`Progress: ${processedCount}/${activeChannelIds.length} channels processed`)
+        }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error)
-        log(`Refill: Error on #${channel.name}: ${errorMessage}`)
+        log(`Refill: Error on #${channelName}: ${errorMessage}`)
       }
 
       // Small delay between channels
@@ -600,6 +635,23 @@ async function runRefill(durationStr: string = '12h'): Promise<void> {
 
     await refillClient.disconnect()
     closeDB()
+
+    // Auto-start the archive service after successful refill
+    log('\nStarting archive service...')
+    try {
+      const archiveProcess = spawn('npm', ['run', 'archive'], {
+        detached: true,
+        stdio: 'ignore',
+        shell: true
+      })
+      archiveProcess.unref()
+      log('Archive service started successfully')
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      log(`Warning: Could not auto-start archive service: ${errorMessage}`)
+      log('Please start it manually with: npm run archive')
+    }
+
     process.exit(0)
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error)
