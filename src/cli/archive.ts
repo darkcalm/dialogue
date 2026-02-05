@@ -780,6 +780,11 @@ async function main(): Promise<void> {
     await client.connect()
     log('Connected to Discord!')
 
+    // Set up real-time message handling IMMEDIATELY after connect
+    log('Setting up real-time message handlers...')
+    setupRealtimeHandlers(client)
+    log('Real-time handlers active')
+
     const user = client.getCurrentUser()
     if (user) {
       log(`Logged in as ${user.username}`)
@@ -794,10 +799,6 @@ async function main(): Promise<void> {
     for (const channel of channels) {
       await saveChannel(channelToRecord(channel))
     }
-
-    // Set up real-time message handling
-    log('Setting up real-time message handlers...')
-    setupRealtimeHandlers(client)
 
     // Show current stats
     const stats = await getTotalStats()
