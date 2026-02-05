@@ -126,21 +126,25 @@ export class WhatsAppPlatformClient implements IPlatformClient {
     })
 
     // Message delete event
-    this.sock.ev.on('messages.delete', async (deletion) => {
-      if (deletion.keys) {
-        for (const key of deletion.keys) {
-          if (key.remoteJid && key.id) {
-            this.messageDeleteCallbacks.forEach(cb => cb(key.remoteJid!, key.id!))
+    this.sock.ev.on('messages.delete', async (deletion: any) => {
+      if (deletion && typeof deletion === 'object') {
+        const keys = 'keys' in deletion ? deletion.keys : []
+        for (const key of keys) {
+          if (key?.remoteJid && key?.id) {
+            this.messageDeleteCallbacks.forEach(cb => cb(key.remoteJid, key.id))
           }
         }
       }
     })
 
     // Chats update event (to keep cache fresh)
-    this.sock.ev.on('chats.set', ({ chats }) => {
+    this.sock.ev.on('chats.set' as any, (data: any) => {
+      const chats: Chat[] = data?.chats || []
       console.log(`📥 Received ${chats.length} chats from chats.set event`)
       chats.forEach(chat => {
-        this.chatsCache.set(chat.id, chat)
+        if (chat.id) {
+          this.chatsCache.set(chat.id, chat)
+        }
       })
 
       // Mark as ready once we have chats
@@ -150,22 +154,23 @@ export class WhatsAppPlatformClient implements IPlatformClient {
       }
     })
 
-    this.sock.ev.on('chats.update', (updates) => {
-      updates.forEach(update => {
+    this.sock.ev.on('chats.update', (updates: any) => {
+      const updateList: Partial<Chat>[] = Array.isArray(updates) ? updates : []
+      updateList.forEach(update => {
         if (update.id) {
           const existing = this.chatsCache.get(update.id)
           if (existing) {
-            this.chatsCache.set(update.id, { ...existing, ...update })
+            this.chatsCache.set(update.id, { ...existing, ...update } as Chat)
           }
         }
       })
     })
 
     // New chat/channel event
-    this.sock.ev.on('chats.upsert', (chats) => {
+    this.sock.ev.on('chats.upsert', (chats: Chat[]) => {
       chats.forEach(chat => {
         // Only fire callback for truly new chats not already in cache
-        if (!this.chatsCache.has(chat.id)) {
+        if (chat.id && !this.chatsCache.has(chat.id)) {
           this.chatsCache.set(chat.id, chat)
           if (this.channelCreateCallbacks.length > 0) {
             const platformChannel = adaptWhatsAppChat(chat)
@@ -223,14 +228,17 @@ export class WhatsAppPlatformClient implements IPlatformClient {
 
           // Convert groups to chats and add to cache
           Object.values(groups).forEach((group: any) => {
-            const chat: Chat = {
-              id: group.id,
-              name: group.subject,
-              conversationTimestamp: Date.now(),
-              unreadCount: 0,
+            const groupId = group.id
+            if (groupId && typeof groupId === 'string') {
+              const chat: Chat = {
+                id: groupId,
+                name: group.subject || '',
+                conversationTimestamp: Date.now(),
+                unreadCount: 0,
+              }
+              this.chatsCache.set(groupId, chat)
+              store.chats.set(groupId, chat)
             }
-            this.chatsCache.set(chat.id, chat)
-            store.chats.set(chat.id, chat)
           })
 
           // Update chats array
@@ -248,7 +256,9 @@ export class WhatsAppPlatformClient implements IPlatformClient {
 
       if (chats.length > 0) {
         chats.forEach(chat => {
-          this.chatsCache.set(chat.id, chat)
+          if (chat.id) {
+            this.chatsCache.set(chat.id, chat)
+          }
         })
 
         // Mark as ready
@@ -346,7 +356,7 @@ export class WhatsAppPlatformClient implements IPlatformClient {
           console.log(`📞 Calling fetchMessageHistory with:`, { limit, channelId })
 
           // Fetch message history (returns a sync ID)
-          const syncId = await this.sock.fetchMessageHistory(limit, messageKey, undefined)
+          const syncId = await this.sock.fetchMessageHistory(limit, messageKey, 0)
           console.log(`✅ Requested message history, sync ID: ${syncId}`)
 
           // Wait a moment for messages to arrive via events
@@ -408,20 +418,20 @@ export class WhatsAppPlatformClient implements IPlatformClient {
       const currentMessages = store.getMessages(channelId)
 
       // Find the "before" message to get its timestamp
-      const beforeMessage = currentMessages.find(m => m.key.id === beforeMessageId)
+      const beforeMessage = currentMessages.find(m => m.key?.id === beforeMessageId)
 
       if (!beforeMessage) {
         console.log(`⚠️  Could not find message ${beforeMessageId} in store`)
         return []
       }
 
-      const beforeTimestamp = beforeMessage.messageTimestamp as number
+      const beforeTimestamp = (beforeMessage.messageTimestamp || 0) as number
 
       // Use fetchMessageHistory with the timestamp to get older messages
       try {
         const messageKey = {
           remoteJid: channelId,
-          fromMe: beforeMessage.key.fromMe || false,
+          fromMe: beforeMessage.key?.fromMe || false,
           id: beforeMessageId,
         }
 
@@ -438,14 +448,14 @@ export class WhatsAppPlatformClient implements IPlatformClient {
 
         // Find newly added messages (those before the original message)
         const olderMessages = updatedMessages.filter(msg => {
-          const msgTimestamp = msg.messageTimestamp as number
+          const msgTimestamp = (msg.messageTimestamp || 0) as number
           return msgTimestamp < beforeTimestamp
         })
 
         // Sort by timestamp and take the most recent N
         olderMessages.sort((a, b) => {
-          const aTime = a.messageTimestamp as number
-          const bTime = b.messageTimestamp as number
+          const aTime = (a.messageTimestamp || 0) as number
+          const bTime = (b.messageTimestamp || 0) as number
           return bTime - aTime
         })
 

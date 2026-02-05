@@ -27,7 +27,11 @@ class SimpleStore {
     try {
       ev.on('chats.set', ({ chats }: { chats: Chat[] }) => {
         console.log(`📦 Store: chats.set - Received ${chats.length} chats`)
-        chats.forEach(chat => this.chats.set(chat.id, chat))
+        chats.forEach(chat => {
+          if (chat.id) {
+            this.chats.set(chat.id, chat)
+          }
+        })
       })
       console.log('✅ Bound: chats.set')
     } catch (err) {
@@ -57,7 +61,11 @@ class SimpleStore {
     try {
       ev.on('chats.upsert', (chats: Chat[]) => {
         console.log(`📦 Store: chats.upsert - Received ${chats.length} chats`)
-        chats.forEach(chat => this.chats.set(chat.id, chat))
+        chats.forEach(chat => {
+          if (chat.id) {
+            this.chats.set(chat.id, chat)
+          }
+        })
       })
       console.log('✅ Bound: chats.upsert')
     } catch (err) {
@@ -70,12 +78,16 @@ class SimpleStore {
         console.log(`📦 Store: messaging-history.set - Received data`)
         if (data.chats && Array.isArray(data.chats)) {
           console.log(`📦 Store: Found ${data.chats.length} chats in messaging history`)
-          data.chats.forEach((chat: Chat) => this.chats.set(chat.id, chat))
+          data.chats.forEach((chat: Chat) => {
+            if (chat.id) {
+              this.chats.set(chat.id, chat)
+            }
+          })
         }
         if (data.messages && Array.isArray(data.messages)) {
           console.log(`📦 Store: Found ${data.messages.length} messages in messaging history`)
           data.messages.forEach((msg: proto.IWebMessageInfo) => {
-            const chatId = msg.key.remoteJid
+            const chatId = msg.key?.remoteJid
             if (chatId) {
               if (!this.messages.has(chatId)) {
                 this.messages.set(chatId, [])
@@ -105,7 +117,7 @@ class SimpleStore {
     ev.on('messages.set', ({ messages }: { messages: proto.IWebMessageInfo[] }) => {
       console.log(`📦 Store: messages.set - Received ${messages.length} messages`)
       messages.forEach(msg => {
-        const chatId = msg.key.remoteJid
+        const chatId = msg.key?.remoteJid
         if (chatId) {
           if (!this.messages.has(chatId)) {
             this.messages.set(chatId, [])
@@ -117,14 +129,14 @@ class SimpleStore {
 
     ev.on('messages.upsert', ({ messages }: { messages: proto.IWebMessageInfo[] }) => {
       messages.forEach(msg => {
-        const chatId = msg.key.remoteJid
+        const chatId = msg.key?.remoteJid
         if (chatId) {
           if (!this.messages.has(chatId)) {
             this.messages.set(chatId, [])
           }
           // Add only if not already present
           const existing = this.messages.get(chatId)!
-          if (!existing.find(m => m.key.id === msg.key.id)) {
+          if (!existing.find(m => m.key?.id === msg.key?.id)) {
             existing.push(msg)
           }
         }
@@ -177,11 +189,12 @@ export async function createWhatsAppConnection(
     // Get messages from server
     getMessage: async (key) => {
       // Return message from store if available
-      const chatId = key.remoteJid
-      if (chatId) {
+      const chatId = key.remoteJid || ''
+      const msgId = key.id || ''
+      if (chatId && msgId) {
         const messages = store.getMessages(chatId)
-        const msg = messages.find(m => m.key.id === key.id)
-        return msg || undefined
+        const msg = messages.find(m => m.key?.id === msgId)
+        return msg as any
       }
       return undefined
     },

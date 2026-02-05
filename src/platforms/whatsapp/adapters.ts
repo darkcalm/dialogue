@@ -19,24 +19,25 @@ import {
 export function adaptWhatsAppChat(chat: Chat): IPlatformChannel {
   // Determine channel type
   let type: 'text' | 'dm' | 'group' | 'thread'
-  if (chat.id.endsWith('@g.us')) {
+  const chatId = chat.id || ''
+  if (chatId.endsWith('@g.us')) {
     type = 'group' // Group chat
-  } else if (chat.id.endsWith('@s.whatsapp.net')) {
+  } else if (chatId.endsWith('@s.whatsapp.net')) {
     type = 'dm' // 1-on-1 chat
   } else {
     type = 'dm' // Default to DM
   }
 
   // Extract name
-  let name = chat.name || chat.id
+  let name = chat.name || chatId
   // Try to clean up the ID if no name is available
   if (!chat.name) {
-    const phoneNumber = chat.id.split('@')[0]
+    const phoneNumber = chatId.split('@')[0]
     name = phoneNumber
   }
 
   return {
-    id: chat.id,
+    id: chatId,
     name,
     type,
     platform: 'whatsapp',
@@ -110,55 +111,56 @@ function extractMessageContent(message: proto.IWebMessageInfo): string {
  */
 function extractAttachments(message: proto.IWebMessageInfo): IAttachment[] {
   const msg = message.message
-  if (!msg) return []
+  if (!msg || !message.key) return []
 
   const attachments: IAttachment[] = []
+  const messageId = message.key.id || 'unknown'
 
   // Image
   if (msg.imageMessage) {
     attachments.push({
-      id: message.key.id || 'image',
+      id: messageId || 'image',
       name: msg.imageMessage.caption || 'image.jpg',
       url: msg.imageMessage.url || '',
       size: Number(msg.imageMessage.fileLength) || 0,
-      contentType: msg.imageMessage.mimetype,
-      width: msg.imageMessage.width,
-      height: msg.imageMessage.height,
+      contentType: msg.imageMessage.mimetype || undefined,
+      width: msg.imageMessage.width || undefined,
+      height: msg.imageMessage.height || undefined,
     })
   }
 
   // Video
   if (msg.videoMessage) {
     attachments.push({
-      id: message.key.id || 'video',
+      id: messageId || 'video',
       name: msg.videoMessage.caption || 'video.mp4',
       url: msg.videoMessage.url || '',
       size: Number(msg.videoMessage.fileLength) || 0,
-      contentType: msg.videoMessage.mimetype,
-      width: msg.videoMessage.width,
-      height: msg.videoMessage.height,
+      contentType: msg.videoMessage.mimetype || undefined,
+      width: msg.videoMessage.width || undefined,
+      height: msg.videoMessage.height || undefined,
     })
   }
 
   // Document
   if (msg.documentMessage) {
     attachments.push({
-      id: message.key.id || 'document',
+      id: messageId || 'document',
       name: msg.documentMessage.fileName || 'document',
       url: msg.documentMessage.url || '',
       size: Number(msg.documentMessage.fileLength) || 0,
-      contentType: msg.documentMessage.mimetype,
+      contentType: msg.documentMessage.mimetype || undefined,
     })
   }
 
   // Audio
   if (msg.audioMessage) {
     attachments.push({
-      id: message.key.id || 'audio',
+      id: messageId || 'audio',
       name: 'audio.ogg',
       url: msg.audioMessage.url || '',
       size: Number(msg.audioMessage.fileLength) || 0,
-      contentType: msg.audioMessage.mimetype,
+      contentType: msg.audioMessage.mimetype || undefined,
     })
   }
 
@@ -218,7 +220,8 @@ export function adaptWhatsAppMessage(
 ): IPlatformMessage {
   // Extract sender info
   const pushName = message.pushName || 'Unknown'
-  const senderId = message.key.participant || message.key.remoteJid || chatId
+  const messageKey = message.key || {}
+  const senderId = messageKey.participant || messageKey.remoteJid || chatId
 
   // Extract content
   const content = extractMessageContent(message)
@@ -238,7 +241,7 @@ export function adaptWhatsAppMessage(
   const replyTo = extractReplyInfo(message)
 
   return {
-    id: message.key.id || '',
+    id: messageKey.id || '',
     channelId: chatId,
     author: pushName,
     authorId: senderId,
@@ -249,9 +252,11 @@ export function adaptWhatsAppMessage(
     attachments,
     reactions,
     replyTo,
+    embeds: [],
+    stickers: [],
     metadata: {
       nativeMessage: message,
-      fromMe: message.key.fromMe || false,
+      fromMe: messageKey.fromMe || false,
     },
   }
 }
@@ -260,7 +265,7 @@ export function adaptWhatsAppMessage(
  * Check if a message is from the current user
  */
 export function isMessageFromMe(message: proto.IWebMessageInfo): boolean {
-  return message.key.fromMe || false
+  return message.key?.fromMe || false
 }
 
 /**
