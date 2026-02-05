@@ -70,6 +70,7 @@ export interface AppState {
   focusMode: UnifiedFocusMode // Are we navigating or composing?
   readerFocusChannel: string | null // Channel ID in reader focus mode
   channelMessageOffsets: Map<string, number> // Scroll offset for messages in reader mode
+  readerSelectedMessageOffset: number // Which message within visible window is selected (0 to DEFAULT_VISIBLE_MESSAGES-1)
   selectedMessageIndex: number // Deprecated - use flatItems instead
   messageScrollIndex: number
 
@@ -136,11 +137,13 @@ type Action =
   | { type: 'SET_FOCUS_MODE'; mode: UnifiedFocusMode }
   | { type: 'SET_READER_FOCUS'; channelId: string | null }
   | { type: 'SCROLL_CHANNEL_MESSAGES'; channelId: string; delta: number }
+  | { type: 'SET_READER_SELECTED_MESSAGE_OFFSET'; offset: number }
   | { type: 'COLLAPSE_ALL_CHANNELS' }
   | { type: 'EXPAND_CHANNEL'; channelId: string }
   | { type: 'SET_EXPANDED_CHANNELS'; expandedChannels: Set<string>; expandedChannelData: Map<string, ExpandedChannelData> }
   | { type: 'SELECT_FLAT_INDEX'; index: number }
   | { type: 'SET_FLAT_ITEMS'; items: FlatItem[] }
+  | { type: 'MARK_CHANNEL_READ'; channelId: string }
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -303,17 +306,20 @@ function reducer(state: AppState, action: Action): AppState {
       }
       // Initialize scroll offset for this channel if not set
       const newOffsets = new Map(state.channelMessageOffsets)
+      const data = state.expandedChannelData.get(action.channelId)
+      const totalMsgs = data?.messages.length || 0
       if (!newOffsets.has(action.channelId)) {
         // Default to showing the most recent messages
-        const data = state.expandedChannelData.get(action.channelId)
-        const totalMsgs = data?.messages.length || 0
         newOffsets.set(action.channelId, Math.max(0, totalMsgs - DEFAULT_VISIBLE_MESSAGES))
       }
+      // Default to selecting the last visible message (most recent)
+      const visibleCount = Math.min(DEFAULT_VISIBLE_MESSAGES, totalMsgs)
       return {
         ...state,
         readerFocusChannel: action.channelId,
         focusMode: 'reader',
         channelMessageOffsets: newOffsets,
+        readerSelectedMessageOffset: visibleCount - 1,
       }
     }
     case 'SCROLL_CHANNEL_MESSAGES': {
@@ -325,6 +331,8 @@ function reducer(state: AppState, action: Action): AppState {
       newOffsets.set(action.channelId, newOffset)
       return { ...state, channelMessageOffsets: newOffsets }
     }
+    case 'SET_READER_SELECTED_MESSAGE_OFFSET':
+      return { ...state, readerSelectedMessageOffset: action.offset }
     case 'SET_EXPANDED_CHANNELS':
       return {
         ...state,
@@ -338,6 +346,31 @@ function reducer(state: AppState, action: Action): AppState {
       }
     case 'SET_FLAT_ITEMS':
       return { ...state, flatItems: action.items }
+    case 'MARK_CHANNEL_READ': {
+      // Update channel group from 'new' to 'following' and clear newMessageCount
+      // Also update the display item to remove the (N new) indicator
+      const channelIndex = state.channels.findIndex(c => c.id === action.channelId)
+      if (channelIndex === -1) return state
+      
+      const channel = state.channels[channelIndex] as ChannelInfo & { group?: string; newMessageCount?: number }
+      if (channel.group !== 'new') return state // Already read
+      
+      const updatedChannel = { ...channel, group: 'following' as const, newMessageCount: undefined }
+      const newChannels = [...state.channels]
+      newChannels[channelIndex] = updatedChannel
+      
+      // Update display item to remove "(N new)" suffix
+      const newDisplayItems = [...state.channelDisplayItems]
+      const displayIdx = state.channelDisplayItems.findIndex(item => 
+        !item.startsWith('══════') && item.includes(channel.name)
+      )
+      if (displayIdx >= 0) {
+        // Remove the "(N new)" part from the display string
+        newDisplayItems[displayIdx] = newDisplayItems[displayIdx].replace(/\s*\(\d+\s*new\)\s*$/, '')
+      }
+      
+      return { ...state, channels: newChannels, channelDisplayItems: newDisplayItems }
+    }
     default:
       return state
   }
@@ -816,6 +849,8 @@ interface UnifiedViewProps {
   expandedChannelData: Map<string, ExpandedChannelData>
   focusMode: UnifiedFocusMode
   readerFocusChannel: string | null
+  readerSelectedMessageOffset: number
+  channelMessageOffsets: Map<string, number>
   inputText: string
   inputCursorPos: number
   onInputChange: (text: string) => void
@@ -835,6 +870,8 @@ function UnifiedView({
   expandedChannelData,
   focusMode,
   readerFocusChannel,
+  readerSelectedMessageOffset,
+  channelMessageOffsets,
   inputText,
   inputCursorPos,
   onInputChange,
@@ -928,7 +965,12 @@ function UnifiedView({
             if (currentItem.channelId !== channel.id) break
 
             if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
-              const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
+              const isNavSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
+              // In reader mode, check if this message is the selected one
+              const isReaderChannel = readerFocusChannel === channel.id
+              const readerOffset = channelMessageOffsets.get(channel.id) || 0
+              const isReaderSelected = isReaderChannel && currentItem.messageIndex === readerOffset + readerSelectedMessageOffset
+              const isSelected = isNavSelected || isReaderSelected
               const msg = data.messages[currentItem.messageIndex]
               if (msg) {
                 const attachmentIndicator = msg.hasAttachments
@@ -943,7 +985,7 @@ function UnifiedView({
                   <Text
                     key={`msg-${channel.id}-${msg.id}`}
                     inverse={isSelected}
-                    color={isSelected ? 'blue' : 'gray'}
+                    color={isSelected ? (isReaderSelected ? 'magenta' : 'blue') : 'gray'}
                   >
                     {'    '}
                     {isSelected ? '▶ ' : '  '}
@@ -1121,6 +1163,7 @@ export function App({
     focusMode: 'navigation' as UnifiedFocusMode,
     readerFocusChannel: null,
     channelMessageOffsets: new Map<string, number>(),
+    readerSelectedMessageOffset: 0,
     selectedMessageIndex: -1,
     messageScrollIndex: 0,
 
@@ -1997,35 +2040,173 @@ export function App({
         return
       }
 
-      // Reader mode: up/down only scrolls channel messages
+      // Reader mode: navigate between visible messages, scroll when at edge, and allow actions
       if (state.readerFocusChannel) {
-        const readerData = state.expandedChannelData.get(state.readerFocusChannel)
-        const readerOffset = state.channelMessageOffsets.get(state.readerFocusChannel) || 0
+        const channelId = state.readerFocusChannel
+        const readerData = state.expandedChannelData.get(channelId)
+        const readerOffset = state.channelMessageOffsets.get(channelId) || 0
         const totalMessages = readerData?.messages.length || 0
+        const visibleCount = Math.min(DEFAULT_VISIBLE_MESSAGES, totalMessages)
+        const channel = state.channels.find(c => c.id === channelId)
+
+        // Get the currently selected message
+        const selectedMsgIndex = readerOffset + state.readerSelectedMessageOffset
+        const selectedMsg = readerData?.messages[selectedMsgIndex]
 
         if (key.upArrow || input === 'k') {
-          // Scroll up (show older messages)
-          if (readerOffset > 0) {
-            dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId: state.readerFocusChannel, delta: -1 })
-            const newOffset = readerOffset - 1
-            dispatch({ type: 'SET_STATUS', text: `Reader: messages ${newOffset + 1}-${Math.min(newOffset + DEFAULT_VISIBLE_MESSAGES, totalMessages)} of ${totalMessages}` })
-          } else {
-            dispatch({ type: 'SET_STATUS', text: `Reader: at oldest messages (1-${Math.min(DEFAULT_VISIBLE_MESSAGES, totalMessages)} of ${totalMessages})` })
+          // Move selection up within visible window, or scroll when at top
+          if (state.readerSelectedMessageOffset > 0) {
+            dispatch({ type: 'SET_READER_SELECTED_MESSAGE_OFFSET', offset: state.readerSelectedMessageOffset - 1 })
+          } else if (readerOffset > 0) {
+            // At top of visible window, scroll up
+            dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId, delta: -1 })
           }
+          const newMsgIdx = Math.max(0, selectedMsgIndex - 1)
+          dispatch({ type: 'SET_STATUS', text: `Reader: message ${newMsgIdx + 1} of ${totalMessages} · e react · r reply · v view` })
           return
         }
         if (key.downArrow || input === 'j') {
-          // Scroll down (show newer messages)
-          const maxOffset = Math.max(0, totalMessages - DEFAULT_VISIBLE_MESSAGES)
-          if (readerOffset < maxOffset) {
-            dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId: state.readerFocusChannel, delta: 1 })
-            const newOffset = readerOffset + 1
-            dispatch({ type: 'SET_STATUS', text: `Reader: messages ${newOffset + 1}-${Math.min(newOffset + DEFAULT_VISIBLE_MESSAGES, totalMessages)} of ${totalMessages}` })
+          // Move selection down within visible window, or scroll when at bottom
+          if (state.readerSelectedMessageOffset < visibleCount - 1) {
+            dispatch({ type: 'SET_READER_SELECTED_MESSAGE_OFFSET', offset: state.readerSelectedMessageOffset + 1 })
           } else {
-            dispatch({ type: 'SET_STATUS', text: `Reader: at newest messages (${readerOffset + 1}-${totalMessages} of ${totalMessages})` })
+            // At bottom of visible window, scroll down if possible
+            const maxOffset = Math.max(0, totalMessages - DEFAULT_VISIBLE_MESSAGES)
+            if (readerOffset < maxOffset) {
+              dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId, delta: 1 })
+            }
+          }
+          const newMsgIdx = Math.min(totalMessages - 1, selectedMsgIndex + 1)
+          dispatch({ type: 'SET_STATUS', text: `Reader: message ${newMsgIdx + 1} of ${totalMessages} · e react · r reply · v view` })
+          return
+        }
+
+        // React (e) on selected message
+        if (input === 'e' && selectedMsg && channel) {
+          dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+          dispatch({ type: 'SELECT_MESSAGE_INDEX', index: selectedMsgIndex })
+          if (readerData) {
+            dispatch({ type: 'SET_MESSAGES', messages: readerData.messages })
+          }
+          dispatch({ type: 'SET_VIEW', view: 'react' })
+          dispatch({ type: 'SET_STATUS', text: 'React - Enter emoji, Esc to cancel' })
+          return
+        }
+
+        // Reply (r) on selected message
+        if (input === 'r' && selectedMsg && channel) {
+          dispatch({ type: 'SET_REPLYING_TO', messageId: selectedMsg.id })
+          dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+          dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+          const inputIndex = findInputIndexForChannel(state.flatItems, channelId)
+          if (inputIndex >= 0) {
+            dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIndex })
+          }
+          dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+          dispatch({ type: 'SET_STATUS', text: 'Reply - Enter to send, Esc to cancel' })
+          return
+        }
+
+        // Delete (d) on selected message
+        if (input === 'd' && selectedMsg && channel && client) {
+          const currentUser = client.getCurrentUser()
+          if (!currentUser) {
+            dispatch({ type: 'SET_STATUS', text: '❌ User not found' })
+            return
+          }
+          if (selectedMsg.authorId !== currentUser.id) {
+            dispatch({ type: 'SET_STATUS', text: '❌ Can only delete your own messages' })
+            return
+          }
+          try {
+            await client.deleteMessage(channelId, selectedMsg.id)
+            dispatch({ type: 'SET_STATUS', text: '✅ Message deleted' })
+            const messages = await loadMessagesForChannel(channel)
+            dispatch({
+              type: 'SET_EXPANDED_CHANNEL_DATA',
+              channelId,
+              data: { channelId, messages, isLoading: false, hasMoreOlderMessages: true },
+            })
+          } catch (err) {
+            dispatch({
+              type: 'SET_STATUS',
+              text: `❌ Error: ${err instanceof Error ? err.message : 'Unknown'}`,
+            })
           }
           return
         }
+
+        // Download attachments (f)
+        if (input === 'f' && selectedMsg) {
+          if (!selectedMsg.hasAttachments || selectedMsg.attachments.length === 0) {
+            dispatch({ type: 'SET_STATUS', text: 'No attachments on this message' })
+            return
+          }
+          dispatch({ type: 'SET_LOADING', loading: true })
+          try {
+            await downloadAttachmentsFromInfo(selectedMsg.attachments, (status) => {
+              dispatch({ type: 'SET_STATUS', text: status })
+            })
+          } catch (err) {
+            dispatch({
+              type: 'SET_STATUS',
+              text: `❌ Download failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+            })
+          }
+          dispatch({ type: 'SET_LOADING', loading: false })
+          return
+        }
+
+        // Open URLs (u)
+        if (input === 'u' && selectedMsg) {
+          const urls = extractUrls(selectedMsg.content)
+          if (urls.length === 0) {
+            dispatch({ type: 'SET_STATUS', text: 'No URLs in this message' })
+            return
+          }
+          for (const url of urls) {
+            await openUrlInBrowser(url)
+          }
+          dispatch({ type: 'SET_STATUS', text: `Opened ${urls.length} URL(s)` })
+          return
+        }
+
+        // View full message (v)
+        if (input === 'v' && selectedMsg) {
+          const reactionsText = selectedMsg.reactions && selectedMsg.reactions.length > 0
+            ? selectedMsg.reactions
+                .map((r) => {
+                  const userList = r.users.length > 0 ? r.users.join(', ') : '(unknown)'
+                  return `${r.emoji} (${r.count}) - ${userList}`
+                })
+                .join('\n')
+            : undefined
+          dispatch({
+            type: 'SET_MESSAGE_DETAIL',
+            detail: {
+              author: selectedMsg.author,
+              timestamp: selectedMsg.timestamp,
+              content: selectedMsg.content,
+              reactions: reactionsText,
+            },
+          })
+          dispatch({ type: 'SET_VIEW', view: 'reactionUsers' })
+          return
+        }
+
+        // Compose (i)
+        if (input === 'i' && channel) {
+          dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+          dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+          const inputIndex = findInputIndexForChannel(state.flatItems, channelId)
+          if (inputIndex >= 0) {
+            dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIndex })
+          }
+          dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+          dispatch({ type: 'SET_STATUS', text: 'Compose - Enter to send, Esc to cancel' })
+          return
+        }
+
         // Enter exits reader mode
         if (key.return) {
           dispatch({ type: 'SET_READER_FOCUS', channelId: null })
@@ -2178,6 +2359,8 @@ export function App({
                 const totalMsgs = data?.messages.length || 0
                 const startMsg = Math.max(0, totalMsgs - DEFAULT_VISIBLE_MESSAGES) + 1
                 dispatch({ type: 'SET_READER_FOCUS', channelId: channel.id })
+                dispatch({ type: 'MARK_CHANNEL_READ', channelId: channel.id })
+                markChannelVisited(channel.id, undefined, client?.type || 'discord')
                 dispatch({ type: 'SET_STATUS', text: `Reader: ${channel.name} (${startMsg}-${totalMsgs} of ${totalMsgs}) · ↑↓ scroll · Enter exit` })
               }
             }
@@ -2243,6 +2426,8 @@ export function App({
               const totalMsgs = data.messages.length
               const startMsg = Math.max(0, totalMsgs - DEFAULT_VISIBLE_MESSAGES) + 1
               dispatch({ type: 'SET_READER_FOCUS', channelId })
+              dispatch({ type: 'MARK_CHANNEL_READ', channelId })
+              markChannelVisited(channelId, undefined, client?.type || 'discord')
               dispatch({ type: 'SET_STATUS', text: `Reader: ${channel.name} (${startMsg}-${totalMsgs} of ${totalMsgs}) · ↑↓ scroll · Enter exit` })
             }
             return
@@ -2430,6 +2615,32 @@ export function App({
         }
       }
 
+      // Global 'i' to compose - works from any channel/message/input item
+      if (input === 'i' && currentFlatItem) {
+        let channelId: string | null = null
+        if (currentFlatItem.type === 'channel' || currentFlatItem.type === 'message' || currentFlatItem.type === 'input') {
+          channelId = currentFlatItem.channelId
+        }
+        if (channelId) {
+          const channel = state.channels.find(c => c.id === channelId)
+          if (channel) {
+            // Exit reader mode if active
+            if (state.readerFocusChannel) {
+              dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+            }
+            dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+            // Move to input line for this channel
+            const inputIndex = findInputIndexForChannel(state.flatItems, channelId)
+            if (inputIndex >= 0) {
+              dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIndex })
+            }
+            dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+            dispatch({ type: 'SET_STATUS', text: 'Compose - Enter to send, Esc to cancel' })
+            return
+          }
+        }
+      }
+
       // Refresh (R key)
       if (input === 'R' || input === 'r') {
         await refreshAllChannels()
@@ -2600,6 +2811,8 @@ export function App({
             expandedChannelData={state.expandedChannelData}
             focusMode={state.focusMode}
             readerFocusChannel={state.readerFocusChannel}
+            readerSelectedMessageOffset={state.readerSelectedMessageOffset}
+            channelMessageOffsets={state.channelMessageOffsets}
             inputText={state.inputText}
             inputCursorPos={state.inputCursorPos}
             onInputChange={(text) => dispatch({ type: 'SET_INPUT_TEXT', text })}
