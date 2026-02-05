@@ -28,7 +28,9 @@ import {
   getMessageIdsInTimeRange,
   MessageRecord,
   ChannelRecord,
+  enableDualWriteMode,
 } from './db'
+import { initDBWithCache, hasLocalCache } from './local-cache'
 
 // Configuration
 const FETCH_BATCH_SIZE = 100 // Discord API limit
@@ -614,6 +616,18 @@ async function main(): Promise<void> {
   // Initialize database
   log('Initializing database...')
   await initDB()
+
+  // Initialize local cache for dual-write mode
+  log('Initializing local cache for dual-write...')
+  if (!hasLocalCache()) {
+    await initDBWithCache({ forceSync: true })
+  } else {
+    await initDBWithCache() // Sync if stale
+  }
+
+  // Enable dual-write: writes go to both Turso and local cache
+  enableDualWriteMode()
+  log('Dual-write enabled: messages saved to both Turso and local cache')
 
   // Set up shutdown handlers
   setupShutdownHandlers()

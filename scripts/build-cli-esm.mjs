@@ -12,6 +12,11 @@ const root = join(__dirname, '..')
 
 const builds = [
   {
+    entry: join(root, 'src/index.ts'),
+    outfile: join(root, 'dist-esm/index.mjs'),
+    name: 'index.mjs',
+  },
+  {
     entry: join(root, 'src/cli/known.ts'),
     outfile: join(root, 'dist-esm/known.mjs'),
     name: 'known.mjs',
@@ -25,6 +30,16 @@ const builds = [
     entry: join(root, 'src/cli/archive.ts'),
     outfile: join(root, 'dist-esm/archive.mjs'),
     name: 'archive.mjs',
+  },
+  {
+    entry: join(root, 'src/cli/links.ts'),
+    outfile: join(root, 'dist-esm/links.mjs'),
+    name: 'links.mjs',
+  },
+  {
+    entry: join(root, 'src/cli/start-bot.ts'),
+    outfile: join(root, 'dist-esm/start-bot.mjs'),
+    name: 'start-bot.mjs',
   },
 ]
 

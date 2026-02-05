@@ -67,8 +67,8 @@ export const PlatformSelector: React.FC<PlatformSelectorProps> = ({ onSelect, on
   }, [selectedIndex, onSelect, onExit])
 
   return (
-    <Box flexDirection="column" padding={1}>
-      <Box marginBottom={1}>
+    <Box flexDirection="column">
+      <Box>
         <Text bold color="cyan">
           Select a platform:
         </Text>
@@ -78,7 +78,7 @@ export const PlatformSelector: React.FC<PlatformSelectorProps> = ({ onSelect, on
         const isSelected = index === selectedIndex
 
         return (
-          <Box key={option.value} marginBottom={1}>
+          <Box key={option.value}>
             <Box width={3}>
               <Text color={isSelected ? 'green' : 'gray'}>
                 {isSelected ? '▶ ' : '  '}
@@ -96,7 +96,7 @@ export const PlatformSelector: React.FC<PlatformSelectorProps> = ({ onSelect, on
         )
       })}
 
-      <Box marginTop={1} borderStyle="single" borderColor="gray" paddingX={1}>
+      <Box borderStyle="single" borderColor="gray">
         <Text dimColor>
           ↑/↓: Navigate • Enter: Select • Esc: Exit
         </Text>

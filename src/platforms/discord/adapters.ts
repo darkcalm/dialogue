@@ -7,7 +7,6 @@ import {
   ThreadChannel,
   DMChannel,
   Message,
-  Reaction,
   User,
   MessageReaction,
   PartialMessageReaction,

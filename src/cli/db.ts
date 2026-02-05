@@ -1,15 +1,22 @@
 /**
  * Turso database module for message archival
  * Stores Discord messages in cloud SQLite (libSQL)
- * Supports local cache via embedded replica for fast reads
+ *
+ * Dual-write architecture for resilience:
+ * - Archive service writes to BOTH Turso (remote) and local cache
+ * - If one write fails, the other still succeeds (logged but not fatal)
+ * - Bot service periodically syncs local cache from Turso as fallback
+ * - Inbox reads from local cache for fast performance
  */
 
 import { createClient, Client } from '@libsql/client'
 import { getCacheClient, hasLocalCache } from './local-cache'
 
-// Database client (lazy initialized)
-let client: Client | null = null
+// Database clients (lazy initialized)
+let client: Client | null = null // Turso remote client
+let cacheClient: Client | null = null // Local cache client
 let useLocalCache = false
+let useDualWrite = false // Write to both Turso and local cache
 
 /**
  * Get or create the database client
@@ -38,7 +45,8 @@ function getClient(): Client {
 }
 
 /**
- * Enable local cache mode for reads
+ * Enable local cache mode for reads and writes
+ * Writes go to local cache which syncs to Turso via embedded replica
  */
 export function enableLocalCacheMode(): void {
   useLocalCache = true
@@ -49,6 +57,94 @@ export function enableLocalCacheMode(): void {
  */
 export function disableLocalCacheMode(): void {
   useLocalCache = false
+}
+
+/**
+ * Enable dual-write mode - writes go to both Turso and local cache
+ * Provides resilience if one service is down
+ */
+export function enableDualWriteMode(): void {
+  useDualWrite = true
+  // Ensure both clients are available
+  if (!client) {
+    const url = process.env.TURSO_DB_URL
+    const authToken = process.env.TURSO_AUTH_TOKEN
+    if (url) {
+      client = createClient({ url, authToken })
+    }
+  }
+  if (!cacheClient && hasLocalCache()) {
+    cacheClient = getCacheClient()
+  }
+}
+
+/**
+ * Execute a statement on both Turso and local cache (dual-write)
+ * If one fails, still try the other and log error
+ */
+async function executeDualWrite(statement: any): Promise<void> {
+  const errors: string[] = []
+
+  // Try writing to Turso
+  if (client) {
+    try {
+      await client.execute(statement)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error'
+      errors.push(`Turso write failed: ${msg}`)
+      console.error(`⚠️  Turso write failed: ${msg}`)
+    }
+  }
+
+  // Try writing to local cache
+  if (cacheClient) {
+    try {
+      await cacheClient.execute(statement)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error'
+      errors.push(`Local cache write failed: ${msg}`)
+      console.error(`⚠️  Local cache write failed: ${msg}`)
+    }
+  }
+
+  // If both failed, throw error
+  if (errors.length === 2) {
+    throw new Error(`Dual write failed: ${errors.join('; ')}`)
+  }
+}
+
+/**
+ * Execute batch statements on both Turso and local cache (dual-write)
+ */
+async function executeBatchDualWrite(statements: any[]): Promise<void> {
+  const errors: string[] = []
+
+  // Try writing to Turso
+  if (client) {
+    try {
+      await client.batch(statements)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error'
+      errors.push(`Turso batch write failed: ${msg}`)
+      console.error(`⚠️  Turso batch write failed: ${msg}`)
+    }
+  }
+
+  // Try writing to local cache
+  if (cacheClient) {
+    try {
+      await cacheClient.batch(statements)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error'
+      errors.push(`Local cache batch write failed: ${msg}`)
+      console.error(`⚠️  Local cache batch write failed: ${msg}`)
+    }
+  }
+
+  // If both failed, throw error
+  if (errors.length === 2) {
+    throw new Error(`Dual batch write failed: ${errors.join('; ')}`)
+  }
 }
 
 /**
@@ -127,8 +223,7 @@ export interface ChannelRecord {
  * Save or update a channel in the database
  */
 export async function saveChannel(channel: ChannelRecord): Promise<void> {
-  const db = getClient()
-  await db.execute({
+  const statement = {
     sql: `
       INSERT INTO channels (id, name, guild_id, guild_name, parent_id, topic, type, first_seen)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -150,7 +245,14 @@ export async function saveChannel(channel: ChannelRecord): Promise<void> {
       channel.type || null,
       new Date().toISOString(),
     ],
-  })
+  }
+
+  if (useDualWrite) {
+    await executeDualWrite(statement)
+  } else {
+    const db = getClient()
+    await db.execute(statement)
+  }
 }
 
 /**
@@ -191,8 +293,7 @@ export interface MessageRecord {
  * Save or update a message in the database
  */
 export async function saveMessage(msg: MessageRecord): Promise<void> {
-  const db = getClient()
-  await db.execute({
+  const statement = {
     sql: `
       INSERT INTO messages (id, channel_id, author_id, author_name, content, timestamp, edited_timestamp, is_bot, message_type, pinned, attachments, embeds, stickers, reactions, reply_to_id, thread_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -221,7 +322,14 @@ export async function saveMessage(msg: MessageRecord): Promise<void> {
       msg.replyToId || null,
       msg.threadId || null,
     ],
-  })
+  }
+
+  if (useDualWrite) {
+    await executeDualWrite(statement)
+  } else {
+    const db = getClient()
+    await db.execute(statement)
+  }
 }
 
 /**
@@ -230,7 +338,6 @@ export async function saveMessage(msg: MessageRecord): Promise<void> {
 export async function saveMessages(messages: MessageRecord[]): Promise<void> {
   if (messages.length === 0) return
 
-  const db = getClient()
   const statements = messages.map((msg) => ({
     sql: `
       INSERT INTO messages (id, channel_id, author_id, author_name, content, timestamp, edited_timestamp, is_bot, message_type, pinned, attachments, embeds, stickers, reactions, reply_to_id, thread_id)
@@ -262,7 +369,12 @@ export async function saveMessages(messages: MessageRecord[]): Promise<void> {
     ],
   }))
 
-  await db.batch(statements, 'write')
+  if (useDualWrite) {
+    await executeBatchDualWrite(statements)
+  } else {
+    const db = getClient()
+    await db.batch(statements, 'write')
+  }
 }
 
 /**

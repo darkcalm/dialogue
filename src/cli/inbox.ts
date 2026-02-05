@@ -38,21 +38,35 @@ import {
 import { initDBWithCache, hasLocalCache, syncCache } from './local-cache'
 import config from '@/helpers/env'
 
-// Lock file to detect if archive is running
+// Lock files to detect if services are running
 const ARCHIVE_LOCK_FILE = path.join(os.homedir(), '.dialogue-archive.lock')
+const BOT_LOCK_FILE = path.join(os.homedir(), '.dialogue-bot.lock')
 
 // Check if archive process is running
 function isArchiveRunning(): boolean {
   try {
     if (!fs.existsSync(ARCHIVE_LOCK_FILE)) return false
     const pid = parseInt(fs.readFileSync(ARCHIVE_LOCK_FILE, 'utf-8').trim(), 10)
-    // Check if process exists
     process.kill(pid, 0)
     return true
   } catch {
-    // Process doesn't exist or lock file is invalid
     if (fs.existsSync(ARCHIVE_LOCK_FILE)) {
       fs.unlinkSync(ARCHIVE_LOCK_FILE)
+    }
+    return false
+  }
+}
+
+// Check if bot process is running
+function isBotRunning(): boolean {
+  try {
+    if (!fs.existsSync(BOT_LOCK_FILE)) return false
+    const pid = parseInt(fs.readFileSync(BOT_LOCK_FILE, 'utf-8').trim(), 10)
+    process.kill(pid, 0)
+    return true
+  } catch {
+    if (fs.existsSync(BOT_LOCK_FILE)) {
+      fs.unlinkSync(BOT_LOCK_FILE)
     }
     return false
   }
@@ -63,6 +77,18 @@ function spawnArchiveProcess(): ChildProcess {
   const __dirname = path.dirname(fileURLToPath(import.meta.url))
   const archivePath = path.join(__dirname, 'archive.mjs')
   const child = spawn('node', [archivePath], {
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+  return child
+}
+
+// Spawn bot process in background
+function spawnBotProcess(): ChildProcess {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url))
+  const botPath = path.join(__dirname, 'index.mjs')
+  const child = spawn('node', [botPath], {
     detached: true,
     stdio: 'ignore',
   })
@@ -605,14 +631,20 @@ async function main() {
       // Use local cache for fast startup, sync in background
       const hasCachedData = hasLocalCache()
 
+      // Ensure background services are running
+      if (!isArchiveRunning()) {
+        console.log('🚀 Starting archive service in background...')
+        spawnArchiveProcess()
+      }
+      if (!isBotRunning()) {
+        console.log('🤖 Starting bot service in background...')
+        spawnBotProcess()
+      }
+
       if (hasCachedData) {
-        // Fast path: use local cache immediately
+        // Fast path: use local cache immediately (bot handles sync)
         console.log('💾 Loading from local cache...')
-        const start = Date.now()
-        await initDBWithCache() // Syncs if cache is stale
         enableLocalCacheMode()
-        const elapsed = Date.now() - start
-        console.log(`✅ Cache ready in ${elapsed}ms`)
 
         // Build inbox from cache immediately
         console.log('📥 Loading inbox...')
@@ -629,23 +661,14 @@ async function main() {
         inboxData = await buildInboxFromArchive(collapsedSections, botUserId)
       } else {
         // First run: need to sync from Turso
-        // Ensure archive process is running
-        if (!isArchiveRunning()) {
-          console.log('🚀 Starting archive service in background...')
-          spawnArchiveProcess()
+        // Wait for archive to start and have some data
+        console.log('⏳ Waiting for archive to initialize...')
+        await initDB()
+        const hasData = await waitForArchiveData(60000) // Wait up to 60 seconds
 
-          // Wait for archive to start and have some data
-          console.log('⏳ Waiting for archive to initialize...')
-          await initDB()
-          const hasData = await waitForArchiveData(60000) // Wait up to 60 seconds
-
-          if (!hasData) {
-            console.log('⚠️  Archive is starting but no data yet. Please wait and try again.')
-            process.exit(1)
-          }
-        } else {
-          console.log('📚 Archive service is running')
-          await initDB()
+        if (!hasData) {
+          console.log('⚠️  Archive is starting but no data yet. Please wait and try again.')
+          process.exit(1)
         }
 
         // Initialize local cache from Turso

@@ -521,6 +521,7 @@ export const loadMessages = async (
           isBot: msg.author.bot,
           hasAttachments,
           attachmentCount,
+          attachments: [],
           reactions,
           replyTo,
         })
@@ -649,6 +650,7 @@ export const loadOlderMessages = async (
           isBot: msg.author.bot,
           hasAttachments,
           attachmentCount,
+          attachments: [],
           reactions,
           replyTo,
         })

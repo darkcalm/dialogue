@@ -822,13 +822,13 @@ function MessageDetailView({ message }: MessageDetailViewProps) {
       <Text color="cyan" bold>
         [{message.timestamp}] {message.author}
       </Text>
-      <Box marginY={1} flexDirection="column">
-        {message.content.split('\n').map((line, i) => (
-          <Text key={i}>{line}</Text>
-        ))}
-      </Box>
-      {message.reactions && (
-        <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="column">
+         {message.content.split('\n').map((line, i) => (
+           <Text key={i}>{line}</Text>
+         ))}
+       </Box>
+       {message.reactions && (
+         <Box flexDirection="column">
           <Text color="yellow" bold>Reactions:</Text>
           <Text>{message.reactions}</Text>
         </Box>

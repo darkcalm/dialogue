@@ -4,7 +4,8 @@
   "description": "BCD (Basic Consultant Dialogues) Discord bot, built with Discord.js and TypeScript",
   "main": "dist/index.js",
   "scripts": {
-    "start": "npm run build-ts && node dist/index.js",
+    "start": "npm run build:cli-esm && node dist-esm/start-bot.mjs",
+    "start:fg": "npm run build:cli-esm && node dist-esm/index.mjs",
     "develop": "npm run build-ts && tsc-watch --skipLibCheck --onSuccess 'node dist/index.js'",
     "build-ts": "tsc --skipLibCheck",
     "pretty": "prettier --check src",
@@ -14,7 +15,8 @@
     "known": "npm run build:cli-esm && node dist-esm/known.mjs",
     "inbox": "npm run build:cli-esm && node dist-esm/inbox.mjs",
     "archive": "npm run build:cli-esm && node dist-esm/archive.mjs",
-    "archive:whatsapp": "npm run build:cli-esm && node dist-esm/whatsapp-archive.mjs"
+    "archive:whatsapp": "npm run build:cli-esm && node dist-esm/whatsapp-archive.mjs",
+    "links": "npm run build:cli-esm && node dist-esm/links.mjs"
   },
   "keywords": [
     "discord-bot",
