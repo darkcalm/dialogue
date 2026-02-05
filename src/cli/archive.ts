@@ -227,30 +227,39 @@ async function backfillChannel(client: DiscordPlatformClient, channel: IPlatform
 
 /**
  * Catch up on messages that arrived while the archiver was offline
- * For each channel with existing messages, fetch recent messages and save any new ones
+ * Two-phase approach: prioritize channels with recent activity, then catch up on all others
  */
 async function catchUpMissedMessages(client: DiscordPlatformClient, channels: IPlatformChannel[]): Promise<void> {
-  // Try to get last archive timestamp for efficient catch-up
+  const allChannelsWithMessages = await getChannelsWithMessages()
+
+  if (allChannelsWithMessages.length === 0) {
+    log('No existing messages - skipping catch-up phase')
+    return
+  }
+
+  // Try to get last archive timestamp for prioritized catch-up
   const lastTimestamp = getLastArchiveTimestamp()
-  let channelsWithMessages: string[]
+  let priorityChannels: string[] = []
+  let remainingChannels: string[] = allChannelsWithMessages
 
   if (lastTimestamp) {
-    // Efficient path: only catch up on channels with activity since last run
     const hoursSinceLastRun = (Date.now() - lastTimestamp.getTime()) / (1000 * 60 * 60)
     log(`Last archive run: ${lastTimestamp.toISOString()} (${hoursSinceLastRun.toFixed(1)}h ago)`)
 
-    channelsWithMessages = await getChannelsWithMessagesAfter(lastTimestamp.toISOString())
-    log(`Found ${channelsWithMessages.length} channels with recent activity`)
+    // Phase 1: Priority channels with recent activity
+    priorityChannels = await getChannelsWithMessagesAfter(lastTimestamp.toISOString())
+
+    // Phase 2: Remaining channels (might have new messages too)
+    const prioritySet = new Set(priorityChannels)
+    remainingChannels = allChannelsWithMessages.filter(id => !prioritySet.has(id))
+
+    log(`Catch-up plan: ${priorityChannels.length} priority channels, ${remainingChannels.length} remaining`)
   } else {
-    // Fallback: catch up on all channels with messages
-    channelsWithMessages = await getChannelsWithMessages()
-    log(`No last run timestamp - catching up on all ${channelsWithMessages.length} channels`)
+    log(`No last run timestamp - catching up on all ${allChannelsWithMessages.length} channels`)
   }
 
-  if (channelsWithMessages.length === 0) {
-    log('No channels need catch-up - skipping catch-up phase')
-    return
-  }
+  // Combine: priority first, then remaining
+  const channelsWithMessages = [...priorityChannels, ...remainingChannels]
 
   const channelMap = new Map(channels.map((ch) => [ch.id, ch]))
   let totalNewMessages = 0
@@ -263,8 +272,15 @@ async function catchUpMissedMessages(client: DiscordPlatformClient, channels: IP
     const channel = channelMap.get(channelId)
     if (!channel) continue
 
+    // Log phase transition
+    if (priorityChannels.length > 0 && processedChannels === priorityChannels.length + 1) {
+      log(`Priority channels complete. Continuing with remaining channels...`)
+    }
+
     // Log each channel being processed
-    log(`  [${processedChannels}/${channelsWithMessages.length}] Catching up #${channel.name}...`)
+    const isPriority = processedChannels <= priorityChannels.length
+    const prefix = isPriority ? '🔥' : '  '
+    log(`  ${prefix} [${processedChannels}/${channelsWithMessages.length}] Catching up #${channel.name}...`)
 
     try {
       const startTime = Date.now()
