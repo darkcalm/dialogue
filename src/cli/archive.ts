@@ -331,20 +331,34 @@ async function runBackfillLoop(client: DiscordPlatformClient, channels: IPlatfor
   // Track which channels still have more history to fetch
   const activeChannels = new Set(channels.map((ch) => ch.id))
   const channelMap = new Map(channels.map((ch) => [ch.id, ch]))
+  const lastProgressByChannel = new Map<string, number>()
 
   log(`Starting backfill for ${activeChannels.size} channels...`)
 
+  let consecutiveNoProgress = 0
+  const maxConsecutiveNoProgress = 3
+
   while (isRunning && activeChannels.size > 0) {
+    let madeProgress = false
+
     for (const channelId of Array.from(activeChannels)) {
       if (!isRunning) break
 
       const channel = channelMap.get(channelId)
       if (!channel) continue
 
+      const statsBefore = await getTotalStats()
       const hasMore = await backfillChannel(client, channel)
+
+      const statsAfter = await getTotalStats()
+      const messageCountChanged = statsAfter.totalMessages > statsBefore.totalMessages
 
       if (!hasMore) {
         activeChannels.delete(channelId)
+        lastProgressByChannel.delete(channelId)
+      } else if (messageCountChanged) {
+        madeProgress = true
+        lastProgressByChannel.set(channelId, statsAfter.totalMessages)
       }
 
       // Random delay between fetches to avoid rate limits
@@ -352,6 +366,17 @@ async function runBackfillLoop(client: DiscordPlatformClient, channels: IPlatfor
         const delay = randomDelay()
         await sleep(delay)
       }
+    }
+
+    // Check for stalled backfill
+    if (!madeProgress) {
+      consecutiveNoProgress++
+      if (consecutiveNoProgress >= maxConsecutiveNoProgress) {
+        log(`⚠️  No progress for ${maxConsecutiveNoProgress} iterations. Stopping backfill.`)
+        break
+      }
+    } else {
+      consecutiveNoProgress = 0
     }
 
     // Show progress
