@@ -719,9 +719,35 @@ export const formatDateHeader = (date: Date): string => {
 
 // ==================== LLM Integration ====================
 
-export const rewriteMessageWithLLM = async (text: string): Promise<string> => {
+export interface LLMContext {
+  channelName?: string
+  guildName?: string
+  recentMessages?: Array<{ author: string; content: string }>
+}
+
+export const rewriteMessageWithLLM = async (
+  text: string,
+  context?: LLMContext
+): Promise<string> => {
   if (!config.OPENROUTER_API_KEY || !config.OPENROUTER_MODEL) {
     return text
+  }
+
+  // Build context string for the LLM
+  let contextStr = ''
+  if (context) {
+    const location = context.guildName
+      ? `${context.guildName} / #${context.channelName}`
+      : `#${context.channelName || 'unknown'}`
+    contextStr = `You are helping polish a draft reply for a Discord channel: ${location}\n\n`
+
+    if (context.recentMessages && context.recentMessages.length > 0) {
+      contextStr += 'Recent conversation context:\n'
+      for (const msg of context.recentMessages.slice(-5)) {
+        contextStr += `[${msg.author}]: ${msg.content.slice(0, 200)}${msg.content.length > 200 ? '...' : ''}\n`
+      }
+      contextStr += '\n'
+    }
   }
 
   return await new Promise<string>((resolve) => {
@@ -732,15 +758,16 @@ export const rewriteMessageWithLLM = async (text: string): Promise<string> => {
           {
             role: 'system',
             content:
-              'You are a message enhancement pipeline. Your task is to rewrite Discord messages to be clearer, friendlier, and more concise. ' +
-              'CRITICAL: Return ONLY the rewritten message text. Do NOT include any prefixes, explanations, or meta-commentary like "Here\'s a clearer version:" or "Here\'s the rewritten message:". ' +
+              'You are a message polishing assistant. Your task is to improve and brush up draft Discord messages - fixing grammar, improving clarity, and making the tone more natural. ' +
+              'CRITICAL: Return ONLY the polished message text. Do NOT answer or respond to the draft - just improve how it is written. ' +
+              'Do NOT include any prefixes, explanations, or meta-commentary like "Here\'s a polished version:" or "Here\'s the improved message:". ' +
               'Just output the enhanced message text directly. ' +
-              'Preserve the intent and meaning while improving wording and tone. ' +
-              'This is a pipeline transformation, not a conversation - output only the processed text.',
+              'Preserve the original intent and meaning while improving wording, grammar, and tone. ' +
+              'This is a polish/brush-up operation, not a conversation - output only the improved text.',
           },
           {
             role: 'user',
-            content: text,
+            content: contextStr + 'Draft message to polish:\n' + text,
           },
         ],
       })

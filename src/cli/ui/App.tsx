@@ -21,6 +21,7 @@ import {
   downloadAttachmentsFromInfo,
   resolveEmoji,
   emojify,
+  LLMContext,
 } from '../shared'
 import { upsertCachedMessage, deleteCachedMessage, getCachedMessages } from '../cache'
 import { getMessagesFromArchive, MessageRecord } from '../db'
@@ -41,21 +42,35 @@ export interface ExpandedChannelData {
   hasMoreOlderMessages: boolean
 }
 
+// Flat item types for unified navigation
+export type FlatItem =
+  | { type: 'header'; sectionName: string; displayIndex: number }
+  | { type: 'channel'; channelId: string; displayIndex: number }
+  | { type: 'message'; channelId: string; messageIndex: number; messageId: string }
+  | { type: 'input'; channelId: string }
+
 // Focus mode in unified view
-export type UnifiedFocusMode = 'navigation' | 'compose'
+export type UnifiedFocusMode = 'navigation' | 'compose' | 'reader'
+
+// Number of messages to show by default (non-reader mode)
+const DEFAULT_VISIBLE_MESSAGES = 5
 
 export interface AppState {
   view: ViewName
   channels: ChannelInfo[]
   channelDisplayItems: string[] // For inbox grouped display
-  selectedChannelIndex: number
+  selectedChannelIndex: number // Legacy - kept for compatibility
   selectedChannel: ChannelInfo | null
 
-  // Unified view state
+  // Unified view state - flat navigation model
   expandedChannels: Set<string> // Channel IDs that are expanded
   expandedChannelData: Map<string, ExpandedChannelData> // Messages for each expanded channel
+  flatItems: FlatItem[] // Computed flat list of all visible items
+  selectedFlatIndex: number // Position in flat list
   focusMode: UnifiedFocusMode // Are we navigating or composing?
-  selectedMessageIndex: number // Index within the currently focused expanded channel
+  readerFocusChannel: string | null // Channel ID in reader focus mode
+  channelMessageOffsets: Map<string, number> // Scroll offset for messages in reader mode
+  selectedMessageIndex: number // Deprecated - use flatItems instead
   messageScrollIndex: number
 
   messages: MessageInfo[]
@@ -72,8 +87,13 @@ export interface AppState {
   statusText: string
   loading: boolean
 
-  // For reaction users modal
-  reactionUsersContent: string
+  // For message detail modal (v key)
+  messageDetail: {
+    author: string
+    timestamp: string
+    content: string
+    reactions?: string
+  } | null
 
   // Terminal dimensions
   rows: number
@@ -107,16 +127,20 @@ type Action =
   | { type: 'SET_LOADING'; loading: boolean }
   | { type: 'SET_LOADING_OLDER'; loading: boolean }
   | { type: 'SET_HAS_MORE_OLDER'; hasMore: boolean }
-  | { type: 'SET_REACTION_USERS_CONTENT'; content: string }
+  | { type: 'SET_MESSAGE_DETAIL'; detail: { author: string; timestamp: string; content: string; reactions?: string } | null }
   | { type: 'RESET_MESSAGE_STATE' }
   | { type: 'SET_DIMENSIONS'; rows: number; cols: number }
   // Unified view actions
   | { type: 'TOGGLE_CHANNEL_EXPAND'; channelId: string }
   | { type: 'SET_EXPANDED_CHANNEL_DATA'; channelId: string; data: ExpandedChannelData }
   | { type: 'SET_FOCUS_MODE'; mode: UnifiedFocusMode }
+  | { type: 'SET_READER_FOCUS'; channelId: string | null }
+  | { type: 'SCROLL_CHANNEL_MESSAGES'; channelId: string; delta: number }
   | { type: 'COLLAPSE_ALL_CHANNELS' }
   | { type: 'EXPAND_CHANNEL'; channelId: string }
   | { type: 'SET_EXPANDED_CHANNELS'; expandedChannels: Set<string>; expandedChannelData: Map<string, ExpandedChannelData> }
+  | { type: 'SELECT_FLAT_INDEX'; index: number }
+  | { type: 'SET_FLAT_ITEMS'; items: FlatItem[] }
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -235,8 +259,8 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, isLoadingOlderMessages: action.loading }
     case 'SET_HAS_MORE_OLDER':
       return { ...state, hasMoreOlderMessages: action.hasMore }
-    case 'SET_REACTION_USERS_CONTENT':
-      return { ...state, reactionUsersContent: action.content }
+    case 'SET_MESSAGE_DETAIL':
+      return { ...state, messageDetail: action.detail }
     case 'RESET_MESSAGE_STATE':
       return {
         ...state,
@@ -265,7 +289,7 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, expandedChannels: newExpanded }
     }
     case 'COLLAPSE_ALL_CHANNELS':
-      return { ...state, expandedChannels: new Set(), focusMode: 'navigation' }
+      return { ...state, expandedChannels: new Set(), focusMode: 'navigation', readerFocusChannel: null }
     case 'SET_EXPANDED_CHANNEL_DATA': {
       const newData = new Map(state.expandedChannelData)
       newData.set(action.channelId, action.data)
@@ -273,15 +297,130 @@ function reducer(state: AppState, action: Action): AppState {
     }
     case 'SET_FOCUS_MODE':
       return { ...state, focusMode: action.mode }
+    case 'SET_READER_FOCUS': {
+      if (action.channelId === null) {
+        return { ...state, readerFocusChannel: null, focusMode: 'navigation' }
+      }
+      // Initialize scroll offset for this channel if not set
+      const newOffsets = new Map(state.channelMessageOffsets)
+      if (!newOffsets.has(action.channelId)) {
+        // Default to showing the most recent messages
+        const data = state.expandedChannelData.get(action.channelId)
+        const totalMsgs = data?.messages.length || 0
+        newOffsets.set(action.channelId, Math.max(0, totalMsgs - DEFAULT_VISIBLE_MESSAGES))
+      }
+      return {
+        ...state,
+        readerFocusChannel: action.channelId,
+        focusMode: 'reader',
+        channelMessageOffsets: newOffsets,
+      }
+    }
+    case 'SCROLL_CHANNEL_MESSAGES': {
+      const data = state.expandedChannelData.get(action.channelId)
+      if (!data) return state
+      const currentOffset = state.channelMessageOffsets.get(action.channelId) || 0
+      const newOffset = Math.max(0, Math.min(currentOffset + action.delta, data.messages.length - DEFAULT_VISIBLE_MESSAGES))
+      const newOffsets = new Map(state.channelMessageOffsets)
+      newOffsets.set(action.channelId, newOffset)
+      return { ...state, channelMessageOffsets: newOffsets }
+    }
     case 'SET_EXPANDED_CHANNELS':
       return {
         ...state,
         expandedChannels: action.expandedChannels,
         expandedChannelData: action.expandedChannelData,
       }
+    case 'SELECT_FLAT_INDEX':
+      return {
+        ...state,
+        selectedFlatIndex: Math.max(0, Math.min(action.index, state.flatItems.length - 1)),
+      }
+    case 'SET_FLAT_ITEMS':
+      return { ...state, flatItems: action.items }
     default:
       return state
   }
+}
+
+// ==================== Helper Functions ====================
+
+// Build flat items array for unified navigation
+function buildFlatItems(
+  displayItems: string[],
+  channels: ChannelInfo[],
+  expandedChannels: Set<string>,
+  expandedChannelData: Map<string, ExpandedChannelData>,
+  getChannelFromDisplayIndex: (index: number, channels: ChannelInfo[]) => ChannelInfo | null,
+  readerFocusChannel: string | null,
+  channelMessageOffsets: Map<string, number>
+): FlatItem[] {
+  const items: FlatItem[] = []
+
+  for (let i = 0; i < displayItems.length; i++) {
+    const item = displayItems[i]
+    const isHeader = item.startsWith('══════')
+
+    if (isHeader) {
+      items.push({ type: 'header', sectionName: item, displayIndex: i })
+    } else {
+      const channel = getChannelFromDisplayIndex(i, channels)
+      if (channel) {
+        items.push({ type: 'channel', channelId: channel.id, displayIndex: i })
+
+        // If expanded, add messages and input line
+        if (expandedChannels.has(channel.id)) {
+          const data = expandedChannelData.get(channel.id)
+          if (data && !data.isLoading && data.messages.length > 0) {
+            // Determine which messages to show
+            const isReaderFocused = readerFocusChannel === channel.id
+            const offset = channelMessageOffsets.get(channel.id) || 0
+
+            // In reader mode or small message count: show slice based on offset
+            // Otherwise show last 5 messages
+            let startIdx: number
+            let endIdx: number
+
+            if (isReaderFocused || data.messages.length <= DEFAULT_VISIBLE_MESSAGES) {
+              startIdx = offset
+              endIdx = Math.min(offset + DEFAULT_VISIBLE_MESSAGES, data.messages.length)
+            } else {
+              // Default: show last 5 messages
+              startIdx = Math.max(0, data.messages.length - DEFAULT_VISIBLE_MESSAGES)
+              endIdx = data.messages.length
+            }
+
+            for (let msgIdx = startIdx; msgIdx < endIdx; msgIdx++) {
+              const msg = data.messages[msgIdx]
+              items.push({
+                type: 'message',
+                channelId: channel.id,
+                messageIndex: msgIdx,
+                messageId: msg.id,
+              })
+            }
+          }
+          // Add input line for expanded channel
+          items.push({ type: 'input', channelId: channel.id })
+        }
+      }
+    }
+  }
+
+  return items
+}
+
+// Find the flat index for a channel's input line
+function findInputIndexForChannel(flatItems: FlatItem[], channelId: string): number {
+  return flatItems.findIndex(item => item.type === 'input' && item.channelId === channelId)
+}
+
+// Get the channel ID that a flat item belongs to (or the nearest one for headers)
+function getChannelIdFromFlatItem(item: FlatItem): string | null {
+  if (item.type === 'channel' || item.type === 'message' || item.type === 'input') {
+    return item.channelId
+  }
+  return null
 }
 
 // ==================== Components ====================
@@ -629,11 +768,16 @@ function LlmReviewView({ originalText, processedText }: LlmReviewViewProps) {
   )
 }
 
-interface ReactionUsersViewProps {
-  content: string
+interface MessageDetailViewProps {
+  message: {
+    author: string
+    timestamp: string
+    content: string
+    reactions?: string
+  }
 }
 
-function ReactionUsersView({ content }: ReactionUsersViewProps) {
+function MessageDetailView({ message }: MessageDetailViewProps) {
   return (
     <Box
       flexDirection="column"
@@ -643,10 +787,20 @@ function ReactionUsersView({ content }: ReactionUsersViewProps) {
       paddingX={1}
     >
       <Text color="cyan" bold>
-        Reaction Users
+        [{message.timestamp}] {message.author}
       </Text>
-      <Text>{content}</Text>
-      <Text color="gray">Press Esc or q to close</Text>
+      <Box marginY={1} flexDirection="column">
+        {message.content.split('\n').map((line, i) => (
+          <Text key={i}>{line}</Text>
+        ))}
+      </Box>
+      {message.reactions && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color="yellow" bold>Reactions:</Text>
+          <Text>{message.reactions}</Text>
+        </Box>
+      )}
+      <Text color="gray" dimColor>Press Esc or q to close</Text>
     </Box>
   )
 }
@@ -656,11 +810,12 @@ function ReactionUsersView({ content }: ReactionUsersViewProps) {
 interface UnifiedViewProps {
   displayItems: string[]
   channels: ChannelInfo[]
-  selectedIndex: number
+  flatItems: FlatItem[]
+  selectedFlatIndex: number
   expandedChannels: Set<string>
   expandedChannelData: Map<string, ExpandedChannelData>
-  selectedMessageIndex: number
   focusMode: UnifiedFocusMode
+  readerFocusChannel: string | null
   inputText: string
   inputCursorPos: number
   onInputChange: (text: string) => void
@@ -674,11 +829,12 @@ interface UnifiedViewProps {
 function UnifiedView({
   displayItems,
   channels,
-  selectedIndex,
+  flatItems,
+  selectedFlatIndex,
   expandedChannels,
   expandedChannelData,
-  selectedMessageIndex,
   focusMode,
+  readerFocusChannel,
   inputText,
   inputCursorPos,
   onInputChange,
@@ -689,128 +845,92 @@ function UnifiedView({
   getChannelFromDisplayIndex,
 }: UnifiedViewProps) {
   const visibleCount = rows - 4
-  const items: React.ReactNode[] = []
 
-  // Build the unified list of channels + expanded messages
-  let lineCount = 0
+  // Calculate scroll offset to keep selected item visible
+  const scrollOffset = Math.max(0, selectedFlatIndex - Math.floor(visibleCount / 2))
 
-  // Calculate where to start rendering for scrolling
-  // We need to count lines up to the selected item
-  let targetLineCount = 0
-  for (let i = 0; i < displayItems.length && i <= selectedIndex; i++) {
-    const item = displayItems[i]
-    const isHeader = item.startsWith('══════')
+  // Render items with loading/empty states for expanded channels
+  const renderedItems: React.ReactNode[] = []
+  let flatIdx = 0
 
-    if (isHeader) {
-      targetLineCount++
-    } else {
-      const channel = getChannelFromDisplayIndex(i, channels)
-      const isExpanded = channel && expandedChannels.has(channel.id)
-      targetLineCount++ // Channel line
-      if (isExpanded && channel) {
-        const data = expandedChannelData.get(channel.id)
-        if (data) {
-          targetLineCount += Math.min(data.messages.length, 5) // Show up to 5 messages
-          targetLineCount += 2 // Compose input area (2 lines)
-        }
-      }
-    }
-  }
-
-  // Scroll offset
-  const scrollOffset = Math.max(0, targetLineCount - Math.floor(visibleCount / 2))
-
-  // Render items
   for (let i = 0; i < displayItems.length; i++) {
-    if (lineCount - scrollOffset >= visibleCount) break
-    if (lineCount - scrollOffset < -20) {
-      // Skip items way before viewport
-      const item = displayItems[i]
-      const isHeader = item.startsWith('══════')
-      if (isHeader) {
-        lineCount++
-      } else {
-        const channel = getChannelFromDisplayIndex(i, channels)
-        const isExpanded = channel && expandedChannels.has(channel.id)
-        lineCount++
-        if (isExpanded && channel) {
-          const data = expandedChannelData.get(channel.id)
-          if (data) {
-            lineCount += Math.min(data.messages.length, 5)
-            lineCount += 2
-          }
-        }
-      }
-      continue
-    }
-
-    const item = displayItems[i]
-    const isHeader = item.startsWith('══════')
-    const isSelected = i === selectedIndex && focusMode === 'navigation'
+    const displayItem = displayItems[i]
+    const isHeader = displayItem.startsWith('══════')
 
     if (isHeader) {
-      if (lineCount - scrollOffset >= 0) {
-        items.push(
-          <Text key={`h-${i}`} color="yellow" dimColor>
-            {item}
-          </Text>
-        )
+      // Find the corresponding flat item
+      if (flatIdx < flatItems.length && flatItems[flatIdx].type === 'header') {
+        if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
+          const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
+          renderedItems.push(
+            <Text key={`h-${i}`} color={isSelected ? 'green' : 'yellow'} dimColor={!isSelected} inverse={isSelected}>
+              {isSelected ? '▶ ' : '  '}{displayItem}
+            </Text>
+          )
+        }
+        flatIdx++
       }
-      lineCount++
     } else {
       const channel = getChannelFromDisplayIndex(i, channels)
-      const isExpanded = channel && expandedChannels.has(channel.id)
-      const expandIcon = isExpanded ? '▼' : '▶'
+      if (!channel) continue
 
-      if (lineCount - scrollOffset >= 0) {
-        items.push(
-          <Text
-            key={`c-${i}`}
-            inverse={isSelected}
-            color={isSelected ? 'green' : isExpanded ? 'cyan' : 'blackBright'}
-          >
-            {isSelected ? '▶ ' : '  '}
-            {expandIcon} {item}
-          </Text>
-        )
+      // Channel line
+      if (flatIdx < flatItems.length && flatItems[flatIdx].type === 'channel') {
+        if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
+          const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
+          const isExpanded = expandedChannels.has(channel.id)
+          const isReaderFocus = readerFocusChannel === channel.id
+          const expandIcon = isExpanded ? '▼' : '▶'
+          const readerIndicator = isReaderFocus ? ' 📖' : ''
+
+          renderedItems.push(
+            <Text
+              key={`c-${channel.id}`}
+              inverse={isSelected}
+              color={isSelected ? 'green' : isReaderFocus ? 'magenta' : isExpanded ? 'cyan' : 'blackBright'}
+            >
+              {isSelected ? '▶ ' : '  '}
+              {expandIcon} {displayItem}{readerIndicator}
+            </Text>
+          )
+        }
+        flatIdx++
       }
-      lineCount++
 
-      // If expanded, show messages and compose input
-      if (isExpanded && channel) {
+      // If expanded, render messages and input
+      if (expandedChannels.has(channel.id)) {
         const data = expandedChannelData.get(channel.id)
-        const isFocusedChannel = i === selectedIndex
 
-        if (data) {
-          if (data.isLoading) {
-            if (lineCount - scrollOffset >= 0) {
-              items.push(
-                <Text key={`load-${channel.id}`} color="gray">
-                  {'    '}⏳ Loading messages...
-                </Text>
-              )
-            }
-            lineCount++
-          } else if (data.messages.length === 0) {
-            if (lineCount - scrollOffset >= 0) {
-              items.push(
-                <Text key={`empty-${channel.id}`} color="gray">
-                  {'    '}(no messages)
-                </Text>
-              )
-            }
-            lineCount++
-          } else {
-            // Show last few messages (up to 5)
-            const recentMessages = data.messages.slice(-5)
-            recentMessages.forEach((msg, msgIdx) => {
-              const actualMsgIdx = data.messages.length - 5 + msgIdx
-              const isMsgSelected =
-                isFocusedChannel &&
-                focusMode === 'navigation' &&
-                selectedMessageIndex === actualMsgIdx
+        if (data?.isLoading) {
+          // Show loading state (not in flatItems, inject directly)
+          if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
+            renderedItems.push(
+              <Text key={`load-${channel.id}`} color="gray">
+                {'    '}⏳ Loading messages...
+              </Text>
+            )
+          }
+        } else if (data && data.messages.length === 0) {
+          // Show empty state
+          if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
+            renderedItems.push(
+              <Text key={`empty-${channel.id}`} color="gray">
+                {'    '}(no messages)
+              </Text>
+            )
+          }
+        } else if (data) {
+          // Render messages based on flatItems (which respects the scroll offset)
+          while (flatIdx < flatItems.length) {
+            const currentItem = flatItems[flatIdx]
+            // Stop if not a message or belongs to different channel
+            if (currentItem.type !== 'message') break
+            if (currentItem.channelId !== channel.id) break
 
-              if (lineCount - scrollOffset >= 0) {
+            if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
+              const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
+              const msg = data.messages[currentItem.messageIndex]
+              if (msg) {
                 const attachmentIndicator = msg.hasAttachments
                   ? ` 📎(${msg.attachmentCount})`
                   : ''
@@ -819,14 +939,14 @@ function UnifiedView({
                     ? ' ' + msg.reactions.map((r) => `${r.emoji}${r.count}`).join(' ')
                     : ''
 
-                items.push(
+                renderedItems.push(
                   <Text
                     key={`msg-${channel.id}-${msg.id}`}
-                    inverse={isMsgSelected}
-                    color={isMsgSelected ? 'blue' : 'gray'}
+                    inverse={isSelected}
+                    color={isSelected ? 'blue' : 'gray'}
                   >
                     {'    '}
-                    {isMsgSelected ? '▶ ' : '  '}
+                    {isSelected ? '▶ ' : '  '}
                     [{msg.timestamp}] {msg.author}
                     {attachmentIndicator}: {msg.content.split('\n')[0].slice(0, 60)}
                     {msg.content.split('\n')[0].length > 60 ? '...' : ''}
@@ -834,22 +954,27 @@ function UnifiedView({
                   </Text>
                 )
               }
-              lineCount++
-            })
+            }
+            flatIdx++
           }
+        }
 
-          // Inline compose input for focused expanded channel
-          if (isFocusedChannel && lineCount - scrollOffset >= 0) {
-            const isComposing = focusMode === 'compose'
-            items.push(
-              <Box key={`compose-${channel.id}`} flexDirection="column">
-                {replyingToMessageId && (
+        // Input line for this channel
+        if (flatIdx < flatItems.length && flatItems[flatIdx].type === 'input') {
+          if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
+            const isSelected = flatIdx === selectedFlatIndex
+            const isComposing = isSelected && focusMode === 'compose'
+            const isInputSelected = isSelected && focusMode === 'navigation'
+
+            renderedItems.push(
+              <Box key={`input-${channel.id}`} flexDirection="column">
+                {replyingToMessageId && isSelected && (
                   <Text color="cyan">{'    '}↳ Replying...</Text>
                 )}
                 <Box>
-                  <Text color={isComposing ? 'green' : 'gray'}>
+                  <Text color={isComposing ? 'green' : isInputSelected ? 'cyan' : 'gray'}>
                     {'    '}
-                    {isComposing ? '✎ ' : '  '}
+                    {isComposing ? '✎ ' : isInputSelected ? '▶ ' : '  '}
                   </Text>
                   {isComposing ? (
                     <SimpleTextInput
@@ -862,15 +987,15 @@ function UnifiedView({
                       focus={true}
                     />
                   ) : (
-                    <Text color="gray" dimColor>
+                    <Text color={isInputSelected ? 'cyan' : 'gray'} dimColor={!isInputSelected} inverse={isInputSelected}>
                       [press i to compose]
                     </Text>
                   )}
                 </Box>
               </Box>
             )
-            lineCount += 2
           }
+          flatIdx++
         }
       }
     }
@@ -878,7 +1003,7 @@ function UnifiedView({
 
   return (
     <Box flexDirection="column" flexGrow={1}>
-      {items}
+      {renderedItems}
     </Box>
   )
 }
@@ -962,6 +1087,25 @@ export function App({
   const displayItems = initialDisplayItems ||
     initialChannels.map((c) => `${c.guildName ? `${c.guildName} / ` : ''}${c.name}`)
 
+  // Build initial flat items (no channels expanded initially)
+  const initialFlatItems = buildFlatItems(
+    displayItems,
+    initialChannels,
+    new Set<string>(),
+    new Map<string, ExpandedChannelData>(),
+    getChannelFromDisplayIndex,
+    null,
+    new Map<string, number>()
+  )
+
+  // Find first non-header in flat items
+  const findFirstSelectableIndex = (items: FlatItem[]) => {
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type !== 'header') return i
+    }
+    return 0
+  }
+
   const initialState: AppState = {
     view: 'unified',
     channels: initialChannels,
@@ -969,10 +1113,14 @@ export function App({
     selectedChannelIndex: findFirstNonHeaderIndex(displayItems),
     selectedChannel: initialChannels[0] || null,
 
-    // Unified view state
+    // Unified view state - flat navigation
     expandedChannels: new Set<string>(),
     expandedChannelData: new Map<string, ExpandedChannelData>(),
+    flatItems: initialFlatItems,
+    selectedFlatIndex: findFirstSelectableIndex(initialFlatItems),
     focusMode: 'navigation' as UnifiedFocusMode,
+    readerFocusChannel: null,
+    channelMessageOffsets: new Map<string, number>(),
     selectedMessageIndex: -1,
     messageScrollIndex: 0,
 
@@ -987,7 +1135,7 @@ export function App({
     llmProcessedText: '',
     statusText: `${title} - ↑↓ navigate · Enter/Tab expand · R refresh · i compose · Esc exit`,
     loading: false,
-    reactionUsersContent: '',
+    messageDetail: null,
     rows: stdout?.rows || 24,
     cols: stdout?.columns || 80,
   }
@@ -1011,11 +1159,25 @@ export function App({
     }
   }, [stdout])
 
+  // Rebuild flat items when channels, expanded state, or data changes
+  useEffect(() => {
+    const newFlatItems = buildFlatItems(
+      state.channelDisplayItems,
+      state.channels,
+      state.expandedChannels,
+      state.expandedChannelData,
+      getChannelFromDisplayIndex,
+      state.readerFocusChannel,
+      state.channelMessageOffsets
+    )
+    dispatch({ type: 'SET_FLAT_ITEMS', items: newFlatItems })
+  }, [state.channelDisplayItems, state.channels, state.expandedChannels, state.expandedChannelData, getChannelFromDisplayIndex, state.readerFocusChannel, state.channelMessageOffsets])
+
   // Load messages for channels with new messages on startup
   const loadMessagesForChannel = useCallback(
     async (channel: ChannelInfo): Promise<MessageInfo[]> => {
       if (useArchiveForMessages) {
-        const archiveMessages = await getMessagesFromArchive(channel.id, 50)
+        const archiveMessages = await getMessagesFromArchive(channel.id, 100)
         return archiveMessages.reverse().map((record: MessageRecord) => ({
           id: record.id,
           author: record.authorName,
@@ -1033,7 +1195,7 @@ export function App({
             : undefined,
         }))
       } else if (client) {
-        return await loadMessagesFromPlatform(client, channel.id)
+        return await loadMessagesFromPlatform(client, channel.id, 100)
       }
       return []
     },
@@ -1290,11 +1452,11 @@ export function App({
 
         if (useArchiveForMessages) {
           // Archive mode: load from database
-          const archiveMessages = await getMessagesFromArchive(channel.id, 50)
+          const archiveMessages = await getMessagesFromArchive(channel.id, 100)
           messages = archiveMessages.reverse().map(archiveRecordToMessageInfo)
         } else if (client) {
           // Live mode: fetch from platform
-          messages = await loadMessagesFromPlatform(client, channel.id)
+          messages = await loadMessagesFromPlatform(client, channel.id, 100)
         } else {
           messages = []
         }
@@ -1325,10 +1487,10 @@ export function App({
       try {
         let messages: MessageInfo[]
         if (useArchiveForMessages) {
-          const archiveMessages = await getMessagesFromArchive(channel.id, 50)
+          const archiveMessages = await getMessagesFromArchive(channel.id, 100)
           messages = archiveMessages.reverse().map(archiveRecordToMessageInfo)
         } else if (client) {
-          messages = await loadMessagesFromPlatform(client, channel.id)
+          messages = await loadMessagesFromPlatform(client, channel.id, 100)
         } else {
           return
         }
@@ -1419,16 +1581,25 @@ export function App({
           messageText = messageText.replace(match[0], '').trim()
         }
 
-        // Check for LLM rewrite
+        // Check for LLM rewrite (llm:// prefix or \\:llm suffix)
         if (
           messageText.startsWith('llm://') ||
-          messageText.endsWith(':\\\\llm')
+          messageText.endsWith('\\\\:llm')
         ) {
           const cleanText = messageText
             .replace(/^llm:\/\//, '')
-            .replace(/:\\\\llm$/, '')
+            .replace(/\\\\:llm$/, '')
             .trim()
-          const processed = await rewriteMessageWithLLM(cleanText)
+          // Build context for LLM
+          const llmContext: LLMContext = {
+            channelName: state.selectedChannel?.name,
+            guildName: state.selectedChannel?.guildName,
+            recentMessages: state.messages.slice(-10).map((m) => ({
+              author: m.author,
+              content: m.content,
+            })),
+          }
+          const processed = await rewriteMessageWithLLM(cleanText, llmContext)
           dispatch({ type: 'SET_LLM_TEXTS', original: cleanText, processed })
           dispatch({ type: 'SET_VIEW', view: 'llmReview' })
           dispatch({
@@ -1549,7 +1720,19 @@ export function App({
         dispatch({ type: 'SET_STATUS', text: '✅ Reaction added!' })
         dispatch({ type: 'SET_VIEW', view: 'unified' })
         dispatch({ type: 'SET_INPUT_TEXT', text: '' })
+        // Refresh both legacy messages and expanded channel data
         await refreshMessages(state.selectedChannel)
+        const messages = await loadMessagesForChannel(state.selectedChannel)
+        dispatch({
+          type: 'SET_EXPANDED_CHANNEL_DATA',
+          channelId: state.selectedChannel.id,
+          data: {
+            channelId: state.selectedChannel.id,
+            messages,
+            isLoading: false,
+            hasMoreOlderMessages: true,
+          },
+        })
       } catch (err) {
         dispatch({
           type: 'SET_STATUS',
@@ -1557,7 +1740,7 @@ export function App({
         })
       }
     },
-    [client, state, refreshMessages]
+    [client, state, refreshMessages, loadMessagesForChannel]
   )
 
   // Open URLs from message
@@ -1601,28 +1784,6 @@ export function App({
       })
     }
     dispatch({ type: 'SET_LOADING', loading: false })
-  }, [state])
-
-  // View reaction users
-  const viewReactionUsers = useCallback(() => {
-    if (state.selectedMessageIndex < 0) return
-
-    const msgInfo = state.messages[state.selectedMessageIndex]
-    if (!msgInfo.reactions || msgInfo.reactions.length === 0) {
-      dispatch({ type: 'SET_STATUS', text: 'No reactions on this message' })
-      return
-    }
-
-    const content = msgInfo.reactions
-      .map((r) => {
-        const userList =
-          r.users.length > 0 ? r.users.join(', ') : '(no users fetched)'
-        return `${r.emoji} (${r.count})\n  ${userList}`
-      })
-      .join('\n\n')
-
-    dispatch({ type: 'SET_REACTION_USERS_CONTENT', content })
-    dispatch({ type: 'SET_VIEW', view: 'reactionUsers' })
   }, [state])
 
   // Toggle channel expand/collapse and load messages
@@ -1722,7 +1883,8 @@ export function App({
   // Send message in unified view (inline compose)
   const sendMessageUnified = useCallback(
     async (text: string) => {
-      const channel = getChannelFromDisplayIndex(state.selectedChannelIndex, state.channels)
+      // Use selectedChannel which is set when entering compose mode
+      const channel = state.selectedChannel
       if (!channel || !text.trim()) return
 
       if (!client) {
@@ -1743,9 +1905,19 @@ export function App({
           messageText = messageText.replace(match[0], '').trim()
         }
 
-        if (messageText.startsWith('llm://') || messageText.endsWith(':\\\\llm')) {
-          const cleanText = messageText.replace(/^llm:\/\//, '').replace(/:\\\\llm$/, '').trim()
-          const processed = await rewriteMessageWithLLM(cleanText)
+        if (messageText.startsWith('llm://') || messageText.endsWith('\\\\:llm')) {
+          const cleanText = messageText.replace(/^llm:\/\//, '').replace(/\\\\:llm$/, '').trim()
+          // Build context for LLM from expanded channel data
+          const channelData = state.expandedChannelData.get(channel.id)
+          const llmContext: LLMContext = {
+            channelName: channel.name,
+            guildName: channel.guildName,
+            recentMessages: channelData?.messages.slice(-10).map((m) => ({
+              author: m.author,
+              content: m.content,
+            })),
+          }
+          const processed = await rewriteMessageWithLLM(cleanText, llmContext)
           dispatch({ type: 'SET_LLM_TEXTS', original: cleanText, processed })
           dispatch({ type: 'SET_VIEW', view: 'llmReview' })
           dispatch({ type: 'SET_LOADING', loading: false })
@@ -1792,7 +1964,7 @@ export function App({
 
       dispatch({ type: 'SET_LOADING', loading: false })
     },
-    [client, state, loadMessagesForChannel, getChannelFromDisplayIndex]
+    [client, state.selectedChannel, state.attachedFiles, state.replyingToMessageId, loadMessagesForChannel]
   )
 
   // Key handling
@@ -1808,6 +1980,8 @@ export function App({
 
     // ==================== Unified View ====================
     if (view === 'unified') {
+      const currentFlatItem = state.flatItems[state.selectedFlatIndex]
+
       // Handle compose mode
       if (focusMode === 'compose') {
         if (key.escape) {
@@ -1823,66 +1997,437 @@ export function App({
         return
       }
 
-      // Navigation mode
+      // Reader mode: up/down only scrolls channel messages
+      if (state.readerFocusChannel) {
+        const readerData = state.expandedChannelData.get(state.readerFocusChannel)
+        const readerOffset = state.channelMessageOffsets.get(state.readerFocusChannel) || 0
+        const totalMessages = readerData?.messages.length || 0
+
+        if (key.upArrow || input === 'k') {
+          // Scroll up (show older messages)
+          if (readerOffset > 0) {
+            dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId: state.readerFocusChannel, delta: -1 })
+            const newOffset = readerOffset - 1
+            dispatch({ type: 'SET_STATUS', text: `Reader: messages ${newOffset + 1}-${Math.min(newOffset + DEFAULT_VISIBLE_MESSAGES, totalMessages)} of ${totalMessages}` })
+          } else {
+            dispatch({ type: 'SET_STATUS', text: `Reader: at oldest messages (1-${Math.min(DEFAULT_VISIBLE_MESSAGES, totalMessages)} of ${totalMessages})` })
+          }
+          return
+        }
+        if (key.downArrow || input === 'j') {
+          // Scroll down (show newer messages)
+          const maxOffset = Math.max(0, totalMessages - DEFAULT_VISIBLE_MESSAGES)
+          if (readerOffset < maxOffset) {
+            dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId: state.readerFocusChannel, delta: 1 })
+            const newOffset = readerOffset + 1
+            dispatch({ type: 'SET_STATUS', text: `Reader: messages ${newOffset + 1}-${Math.min(newOffset + DEFAULT_VISIBLE_MESSAGES, totalMessages)} of ${totalMessages}` })
+          } else {
+            dispatch({ type: 'SET_STATUS', text: `Reader: at newest messages (${readerOffset + 1}-${totalMessages} of ${totalMessages})` })
+          }
+          return
+        }
+        // Enter exits reader mode
+        if (key.return) {
+          dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+          dispatch({ type: 'SET_STATUS', text: `${title} - ↑↓ navigate · Tab expand · Enter reader mode · i compose` })
+          return
+        }
+        // Escape also exits reader mode
+        if (key.escape) {
+          dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+          dispatch({ type: 'SET_STATUS', text: `${title} - ↑↓ navigate · Tab expand · Enter reader mode · i compose` })
+          return
+        }
+        // Block other navigation in reader mode
+        return
+      }
+
+      // Navigation mode - flat navigation
       if (key.upArrow || input === 'k') {
-        const newIndex = state.selectedChannelIndex - 1
+        const newIndex = state.selectedFlatIndex - 1
         if (newIndex >= 0) {
-          dispatch({ type: 'SELECT_CHANNEL_INDEX', index: newIndex })
+          dispatch({ type: 'SELECT_FLAT_INDEX', index: newIndex })
         }
         return
       }
       if (key.downArrow || input === 'j') {
-        const newIndex = state.selectedChannelIndex + 1
-        if (newIndex < state.channelDisplayItems.length) {
-          dispatch({ type: 'SELECT_CHANNEL_INDEX', index: newIndex })
+        const newIndex = state.selectedFlatIndex + 1
+        if (newIndex < state.flatItems.length) {
+          dispatch({ type: 'SELECT_FLAT_INDEX', index: newIndex })
         }
         return
       }
 
-      // Toggle channel expand (Enter or Tab on channel, Tab on header for section)
-      if (key.return || key.tab) {
-        const currentItem = state.channelDisplayItems[state.selectedChannelIndex]
+      // Page scrolling - Ctrl+U/D for half page, Ctrl+B/F or Page Up/Down for full page
+      const pageSize = Math.max(1, state.rows - 6)
+      const halfPage = Math.max(1, Math.floor(pageSize / 2))
 
-        // Check if it's a section header
-        if (currentItem?.startsWith('══════') && onToggleSection) {
-          let section: SectionName | null = null
-          if (currentItem.includes('NEW')) section = 'new'
-          else if (currentItem.includes('FOLLOWING')) section = 'following'
-          else if (currentItem.includes('UNFOLLOWED')) section = 'unfollowed'
+      // Half page up (Ctrl+U)
+      if (key.ctrl && input === 'u') {
+        const newIndex = Math.max(0, state.selectedFlatIndex - halfPage)
+        dispatch({ type: 'SELECT_FLAT_INDEX', index: newIndex })
+        return
+      }
+      // Half page down (Ctrl+D)
+      if (key.ctrl && input === 'd') {
+        const newIndex = Math.min(state.flatItems.length - 1, state.selectedFlatIndex + halfPage)
+        dispatch({ type: 'SELECT_FLAT_INDEX', index: newIndex })
+        return
+      }
+      // Full page up (Ctrl+B or 'g' for top)
+      if (key.ctrl && input === 'b') {
+        const newIndex = Math.max(0, state.selectedFlatIndex - pageSize)
+        dispatch({ type: 'SELECT_FLAT_INDEX', index: newIndex })
+        return
+      }
+      // Full page down (Ctrl+F)
+      if (key.ctrl && input === 'f') {
+        const newIndex = Math.min(state.flatItems.length - 1, state.selectedFlatIndex + pageSize)
+        dispatch({ type: 'SELECT_FLAT_INDEX', index: newIndex })
+        return
+      }
+      // Go to top (g g - just 'g' for simplicity, or G for bottom)
+      if (input === 'g') {
+        dispatch({ type: 'SELECT_FLAT_INDEX', index: 0 })
+        return
+      }
+      if (input === 'G') {
+        dispatch({ type: 'SELECT_FLAT_INDEX', index: state.flatItems.length - 1 })
+        return
+      }
 
-          if (section) {
-            dispatch({ type: 'SET_LOADING', loading: true })
-            const { channels, displayItems: newDisplayItems } = await onToggleSection(section)
-            dispatch({ type: 'SET_CHANNELS', channels, displayItems: newDisplayItems })
-            dispatch({ type: 'SET_LOADING', loading: false })
+      // Handle actions based on current flat item type
+      if (currentFlatItem) {
+        // On header: Enter/Tab toggles section
+        if (currentFlatItem.type === 'header') {
+          if ((key.return || key.tab) && onToggleSection) {
+            const sectionName = currentFlatItem.sectionName
+            let section: SectionName | null = null
+            if (sectionName.includes('NEW')) section = 'new'
+            else if (sectionName.includes('FOLLOWING')) section = 'following'
+            else if (sectionName.includes('UNFOLLOWED')) section = 'unfollowed'
+
+            if (section) {
+              dispatch({ type: 'SET_LOADING', loading: true })
+              const { channels, displayItems: newDisplayItems } = await onToggleSection(section)
+              dispatch({ type: 'SET_CHANNELS', channels, displayItems: newDisplayItems })
+              dispatch({ type: 'SET_LOADING', loading: false })
+              return
+            }
+          }
+
+          // y/x on header applies to next channel below
+          if ((input === 'y' || input === 'x') && (onFollowChannel || onUnfollowChannel)) {
+            // Find next channel below this header
+            for (let i = state.selectedFlatIndex + 1; i < state.flatItems.length; i++) {
+              const item = state.flatItems[i]
+              if (item.type === 'channel') {
+                const channel = state.channels.find(c => c.id === item.channelId)
+                if (channel) {
+                  if (input === 'y' && onFollowChannel) {
+                    dispatch({ type: 'SET_LOADING', loading: true })
+                    dispatch({ type: 'SET_STATUS', text: 'Following channel...' })
+                    const { channels, displayItems: newDisplayItems } = await onFollowChannel(channel)
+                    dispatch({ type: 'SET_CHANNELS', channels, displayItems: newDisplayItems })
+                    dispatch({ type: 'SET_STATUS', text: `✓ Following ${channel.name}` })
+                    dispatch({ type: 'SET_LOADING', loading: false })
+                  } else if (input === 'x' && onUnfollowChannel) {
+                    dispatch({ type: 'SET_LOADING', loading: true })
+                    dispatch({ type: 'SET_STATUS', text: 'Unfollowing channel...' })
+                    const { channels, displayItems: newDisplayItems } = await onUnfollowChannel(channel)
+                    dispatch({ type: 'SET_CHANNELS', channels, displayItems: newDisplayItems })
+                    dispatch({ type: 'SET_STATUS', text: `✓ Unfollowed ${channel.name}` })
+                    dispatch({ type: 'SET_LOADING', loading: false })
+                  }
+                }
+                return
+              }
+            }
+          }
+        }
+
+        // On channel: Tab toggles expand/collapse, Enter toggles reader focus, y/x follows/unfollows
+        if (currentFlatItem.type === 'channel') {
+          // Tab: toggle expand/collapse
+          if (key.tab) {
+            const channel = state.channels.find(c => c.id === currentFlatItem.channelId)
+            if (channel) {
+              // If collapsing and this channel has reader focus, clear it
+              if (state.expandedChannels.has(channel.id) && state.readerFocusChannel === channel.id) {
+                dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+              }
+              await toggleChannelExpand(channel)
+            }
+            return
+          }
+
+          // Enter: toggle reader focus (expand first if needed)
+          if (key.return) {
+            const channel = state.channels.find(c => c.id === currentFlatItem.channelId)
+            if (channel) {
+              // Expand if not expanded
+              if (!state.expandedChannels.has(channel.id)) {
+                await toggleChannelExpand(channel)
+              }
+              // Toggle reader focus
+              if (state.readerFocusChannel === channel.id) {
+                dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+                dispatch({ type: 'SET_STATUS', text: `${title} - ↑↓ navigate · Tab expand · Enter reader mode · i compose` })
+              } else {
+                const data = state.expandedChannelData.get(channel.id)
+                const totalMsgs = data?.messages.length || 0
+                const startMsg = Math.max(0, totalMsgs - DEFAULT_VISIBLE_MESSAGES) + 1
+                dispatch({ type: 'SET_READER_FOCUS', channelId: channel.id })
+                dispatch({ type: 'SET_STATUS', text: `Reader: ${channel.name} (${startMsg}-${totalMsgs} of ${totalMsgs}) · ↑↓ scroll · Enter exit` })
+              }
+            }
+            return
+          }
+
+          if (input === 'y' && onFollowChannel) {
+            const channel = state.channels.find(c => c.id === currentFlatItem.channelId)
+            if (channel) {
+              dispatch({ type: 'SET_LOADING', loading: true })
+              dispatch({ type: 'SET_STATUS', text: 'Following channel...' })
+              const { channels, displayItems: newDisplayItems } = await onFollowChannel(channel)
+              dispatch({ type: 'SET_CHANNELS', channels, displayItems: newDisplayItems })
+              dispatch({ type: 'SET_STATUS', text: `✓ Following ${channel.name}` })
+              dispatch({ type: 'SET_LOADING', loading: false })
+            }
+            return
+          }
+
+          if (input === 'x' && onUnfollowChannel) {
+            const channel = state.channels.find(c => c.id === currentFlatItem.channelId)
+            if (channel) {
+              dispatch({ type: 'SET_LOADING', loading: true })
+              dispatch({ type: 'SET_STATUS', text: 'Unfollowing channel...' })
+              const { channels, displayItems: newDisplayItems } = await onUnfollowChannel(channel)
+              dispatch({ type: 'SET_CHANNELS', channels, displayItems: newDisplayItems })
+              dispatch({ type: 'SET_STATUS', text: `✓ Unfollowed ${channel.name}` })
+              dispatch({ type: 'SET_LOADING', loading: false })
+            }
             return
           }
         }
 
-        // Toggle channel expand
-        const channel = getChannelFromDisplayIndex(state.selectedChannelIndex, state.channels)
-        if (channel) {
-          await toggleChannelExpand(channel)
-        }
-        return
-      }
+        // On message: Tab=collapse, Enter=reader focus, r=reply, e=react, d=delete, f=download, u=urls, v=view, h/←=collapse
+        if (currentFlatItem.type === 'message') {
+          const channelId = currentFlatItem.channelId
+          const channel = state.channels.find(c => c.id === channelId)
+          const data = state.expandedChannelData.get(channelId)
+          const msg = data?.messages[currentFlatItem.messageIndex]
 
-      // Compose new message (i key)
-      if (input === 'i') {
-        const channel = getChannelFromDisplayIndex(state.selectedChannelIndex, state.channels)
-        if (channel) {
-          // Make sure channel is expanded
-          if (!state.expandedChannels.has(channel.id)) {
-            await toggleChannelExpand(channel)
+          // Tab: collapse channel
+          if (key.tab) {
+            if (state.readerFocusChannel === channelId) {
+              dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+            }
+            dispatch({ type: 'TOGGLE_CHANNEL_EXPAND', channelId })
+            // Find the channel line
+            const channelIndex = state.flatItems.findIndex(
+              item => item.type === 'channel' && item.channelId === channelId
+            )
+            if (channelIndex >= 0) {
+              dispatch({ type: 'SELECT_FLAT_INDEX', index: channelIndex })
+            }
+            return
           }
-          dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
-          dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
-          dispatch({
-            type: 'SET_STATUS',
-            text: 'Compose - Enter to send, Esc to cancel',
-          })
+
+          // Enter: toggle reader focus
+          if (key.return) {
+            if (state.readerFocusChannel === channelId) {
+              dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+              dispatch({ type: 'SET_STATUS', text: `${title} - ↑↓ navigate · Tab expand · Enter reader mode · i compose` })
+            } else if (channel && data) {
+              const totalMsgs = data.messages.length
+              const startMsg = Math.max(0, totalMsgs - DEFAULT_VISIBLE_MESSAGES) + 1
+              dispatch({ type: 'SET_READER_FOCUS', channelId })
+              dispatch({ type: 'SET_STATUS', text: `Reader: ${channel.name} (${startMsg}-${totalMsgs} of ${totalMsgs}) · ↑↓ scroll · Enter exit` })
+            }
+            return
+          }
+
+          // Reply (r)
+          if (input === 'r' && msg && channel) {
+            dispatch({ type: 'SET_REPLYING_TO', messageId: msg.id })
+            dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+            // Move to input line for this channel
+            const inputIndex = findInputIndexForChannel(state.flatItems, channelId)
+            if (inputIndex >= 0) {
+              dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIndex })
+            }
+            dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+            dispatch({ type: 'SET_STATUS', text: 'Reply - Enter to send, Esc to cancel' })
+            return
+          }
+
+          // React (e)
+          if (input === 'e' && msg && channel) {
+            dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+            // Store the message index for reaction
+            dispatch({ type: 'SELECT_MESSAGE_INDEX', index: currentFlatItem.messageIndex })
+            // Set messages for the react view to use
+            if (data) {
+              dispatch({ type: 'SET_MESSAGES', messages: data.messages })
+            }
+            dispatch({ type: 'SET_VIEW', view: 'react' })
+            dispatch({ type: 'SET_STATUS', text: 'React - Enter emoji, Esc to cancel' })
+            return
+          }
+
+          // Delete (d)
+          if (input === 'd' && msg && channel && client) {
+            const currentUser = client.getCurrentUser()
+            if (!currentUser) {
+              dispatch({ type: 'SET_STATUS', text: '❌ User not found' })
+              return
+            }
+            if (msg.authorId !== currentUser.id) {
+              dispatch({ type: 'SET_STATUS', text: '❌ Can only delete your own messages' })
+              return
+            }
+            try {
+              await client.deleteMessage(channelId, msg.id)
+              dispatch({ type: 'SET_STATUS', text: '✅ Message deleted' })
+              // Refresh channel messages
+              const messages = await loadMessagesForChannel(channel)
+              dispatch({
+                type: 'SET_EXPANDED_CHANNEL_DATA',
+                channelId,
+                data: { channelId, messages, isLoading: false, hasMoreOlderMessages: true },
+              })
+            } catch (err) {
+              dispatch({
+                type: 'SET_STATUS',
+                text: `❌ Error: ${err instanceof Error ? err.message : 'Unknown'}`,
+              })
+            }
+            return
+          }
+
+          // Download attachments (f)
+          if (input === 'f' && msg) {
+            if (!msg.hasAttachments || msg.attachments.length === 0) {
+              dispatch({ type: 'SET_STATUS', text: 'No attachments on this message' })
+              return
+            }
+            dispatch({ type: 'SET_LOADING', loading: true })
+            try {
+              await downloadAttachmentsFromInfo(msg.attachments, (status) => {
+                dispatch({ type: 'SET_STATUS', text: status })
+              })
+            } catch (err) {
+              dispatch({
+                type: 'SET_STATUS',
+                text: `❌ Download failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+              })
+            }
+            dispatch({ type: 'SET_LOADING', loading: false })
+            return
+          }
+
+          // Open URLs (u)
+          if (input === 'u' && msg) {
+            const urls = extractUrls(msg.content)
+            if (urls.length === 0) {
+              dispatch({ type: 'SET_STATUS', text: 'No URLs in this message' })
+              return
+            }
+            for (const url of urls) {
+              await openUrlInBrowser(url)
+            }
+            dispatch({ type: 'SET_STATUS', text: `Opened ${urls.length} URL(s)` })
+            return
+          }
+
+          // View full message (v)
+          if (input === 'v' && msg) {
+            const reactionsText = msg.reactions && msg.reactions.length > 0
+              ? msg.reactions
+                  .map((r) => {
+                    const userList = r.users.length > 0 ? r.users.join(', ') : '(unknown)'
+                    return `${r.emoji} (${r.count}) - ${userList}`
+                  })
+                  .join('\n')
+              : undefined
+            dispatch({
+              type: 'SET_MESSAGE_DETAIL',
+              detail: {
+                author: msg.author,
+                timestamp: msg.timestamp,
+                content: msg.content,
+                reactions: reactionsText,
+              },
+            })
+            dispatch({ type: 'SET_VIEW', view: 'reactionUsers' })
+            return
+          }
+
+          // Back/collapse (h or left arrow)
+          if (input === 'h' || key.leftArrow) {
+            // Collapse this channel and move selection to the channel line
+            const channel = state.channels.find(c => c.id === channelId)
+            if (channel) {
+              dispatch({ type: 'TOGGLE_CHANNEL_EXPAND', channelId })
+              // Find the channel line in flat items and select it
+              const channelIndex = state.flatItems.findIndex(
+                item => item.type === 'channel' && item.channelId === channelId
+              )
+              if (channelIndex >= 0) {
+                dispatch({ type: 'SELECT_FLAT_INDEX', index: channelIndex })
+              }
+            }
+            return
+          }
         }
-        return
+
+        // On input line: Tab=collapse, i=compose
+        if (currentFlatItem.type === 'input') {
+          // Tab: collapse channel
+          if (key.tab) {
+            const channelId = currentFlatItem.channelId
+            if (state.readerFocusChannel === channelId) {
+              dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+            }
+            dispatch({ type: 'TOGGLE_CHANNEL_EXPAND', channelId })
+            // Find the channel line
+            const channelIndex = state.flatItems.findIndex(
+              item => item.type === 'channel' && item.channelId === channelId
+            )
+            if (channelIndex >= 0) {
+              dispatch({ type: 'SELECT_FLAT_INDEX', index: channelIndex })
+            }
+            return
+          }
+
+          if (input === 'i') {
+            const channel = state.channels.find(c => c.id === currentFlatItem.channelId)
+            if (channel) {
+              dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+              dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+              dispatch({ type: 'SET_STATUS', text: 'Compose - Enter to send, Esc to cancel' })
+            }
+            return
+          }
+
+          // Back/collapse (h or left arrow)
+          if (input === 'h' || key.leftArrow) {
+            const channelId = currentFlatItem.channelId
+            if (state.readerFocusChannel === channelId) {
+              dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+            }
+            dispatch({ type: 'TOGGLE_CHANNEL_EXPAND', channelId })
+            // Find the channel line
+            const channelIndex = state.flatItems.findIndex(
+              item => item.type === 'channel' && item.channelId === channelId
+            )
+            if (channelIndex >= 0) {
+              dispatch({ type: 'SELECT_FLAT_INDEX', index: channelIndex })
+            }
+            return
+          }
+        }
       }
 
       // Refresh (R key)
@@ -1891,21 +2436,14 @@ export function App({
         return
       }
 
-      // Follow channel (y key)
-      if (input === 'y' && onFollowChannel) {
-        await followChannel()
-        return
-      }
-
-      // Unfollow channel (x key)
-      if (input === 'x' && onUnfollowChannel) {
-        await unfollowChannel()
-        return
-      }
-
       // Collapse all (c key)
       if (input === 'c') {
         dispatch({ type: 'COLLAPSE_ALL_CHANNELS' })
+        // Reset selection to first channel
+        const firstChannelIndex = state.flatItems.findIndex(item => item.type === 'channel')
+        if (firstChannelIndex >= 0) {
+          dispatch({ type: 'SELECT_FLAT_INDEX', index: firstChannelIndex })
+        }
         return
       }
 
@@ -1972,7 +2510,7 @@ export function App({
     }
   })
 
-  // Determine help bar bindings based on view
+  // Determine help bar bindings based on view and current item
   const getHelpBindings = () => {
     if (state.view === 'unified') {
       if (state.focusMode === 'compose') {
@@ -1981,12 +2519,46 @@ export function App({
           { key: 'Esc', label: 'cancel' },
         ]
       }
+
+      // Reader mode: simple scroll controls
+      if (state.readerFocusChannel !== null) {
+        return [
+          { key: '↑', label: 'older' },
+          { key: '↓', label: 'newer' },
+          { key: 'Enter/Esc', label: 'exit reader' },
+        ]
+      }
+
+      const currentItem = state.flatItems[state.selectedFlatIndex]
+
+      // On message: show message-level bindings
+      if (currentItem?.type === 'message') {
+        return [
+          { key: '↑↓', label: 'nav' },
+          { key: 'Enter', label: 'reader' },
+          { key: 'Tab', label: 'collapse' },
+          { key: 'r', label: 'reply' },
+          { key: 'e', label: 'react' },
+          { key: 'v', label: 'view' },
+        ]
+      }
+
+      // On input line
+      if (currentItem?.type === 'input') {
+        return [
+          { key: '↑↓', label: 'nav' },
+          { key: 'Tab', label: 'collapse' },
+          { key: 'i', label: 'compose' },
+          { key: 'h', label: 'back' },
+        ]
+      }
+
+      // On channel or header
       return [
-        { key: '↑↓/jk', label: 'navigate' },
-        { key: 'Enter/Tab', label: 'expand' },
-        { key: 'i', label: 'compose' },
-        { key: 'r', label: 'refresh' },
-        { key: 'c', label: 'collapse all' },
+        { key: '↑↓/jk', label: 'nav' },
+        { key: 'Tab', label: 'expand' },
+        { key: 'Enter', label: 'reader' },
+        { key: 'R', label: 'refresh' },
         ...(onFollowChannel ? [{ key: 'y', label: 'follow' }] : []),
         ...(onUnfollowChannel ? [{ key: 'x', label: 'unfollow' }] : []),
         { key: 'Esc', label: 'exit' },
@@ -2022,11 +2594,12 @@ export function App({
           <UnifiedView
             displayItems={state.channelDisplayItems}
             channels={state.channels}
-            selectedIndex={state.selectedChannelIndex}
+            flatItems={state.flatItems}
+            selectedFlatIndex={state.selectedFlatIndex}
             expandedChannels={state.expandedChannels}
             expandedChannelData={state.expandedChannelData}
-            selectedMessageIndex={state.selectedMessageIndex}
             focusMode={state.focusMode}
+            readerFocusChannel={state.readerFocusChannel}
             inputText={state.inputText}
             inputCursorPos={state.inputCursorPos}
             onInputChange={(text) => dispatch({ type: 'SET_INPUT_TEXT', text })}
@@ -2059,8 +2632,8 @@ export function App({
           />
         )}
 
-        {state.view === 'reactionUsers' && (
-          <ReactionUsersView content={state.reactionUsersContent} />
+        {state.view === 'reactionUsers' && state.messageDetail && (
+          <MessageDetailView message={state.messageDetail} />
         )}
       </Box>
 
