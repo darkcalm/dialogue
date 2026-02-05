@@ -140,7 +140,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
           )
         }
 
-        const count = interaction.options.getInteger('count') || 10
+        const count = interaction.options.getInteger('count') || 25
         const channelFilter = interaction.options.getString('channel')
         const links = await getLinks({ limit: count, channelPattern: channelFilter || undefined })
 
@@ -150,6 +150,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
             : 'No links found in the database.')
         }
 
+        // Generate text content and file
+        const linksText = generateLinksText(links)
+        const file = new AttachmentBuilder(Buffer.from(linksText, 'utf-8'), { name: 'links.txt' })
+
+        // Create summary embed
         const title = channelFilter 
           ? `📋 Recent ${links.length} Links in "${channelFilter}"`
           : `📋 Recent ${links.length} Links`
@@ -157,20 +162,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         const embed = new EmbedBuilder()
           .setTitle(title)
           .setColor(0x5865f2)
+          .setDescription(`📥 Download **links.txt** below`)
 
-        const description = links
-          .map((link) => {
-            const date = new Date(link.timestamp).toLocaleDateString()
-            const channel = link.channelName || 'unknown'
-            const truncatedUrl =
-              link.url.length > 60 ? link.url.substring(0, 57) + '...' : link.url
-            return `**${link.authorName}** in #${channel} (${date})\n🔗 ${truncatedUrl}`
-          })
-          .join('\n\n')
-
-        embed.setDescription(description.substring(0, 4096))
-
-        return interaction.editReply({ embeds: [embed] })
+        return interaction.editReply({ embeds: [embed], files: [file] })
       }
 
       case 'search': {
