@@ -23,7 +23,7 @@ export const data = new SlashCommandBuilder()
       .addStringOption((option) =>
         option
           .setName('channel')
-          .setDescription('Filter by channel name (substring match)')
+          .setDescription('Filter by channel or thread name (substring match)')
           .setRequired(false)
       )
       .addIntegerOption((option) =>
@@ -48,7 +48,7 @@ export const data = new SlashCommandBuilder()
       .addStringOption((option) =>
         option
           .setName('channel')
-          .setDescription('Filter by channel name (substring match)')
+          .setDescription('Filter by channel or thread name (substring match)')
           .setRequired(false)
       )
       .addIntegerOption((option) =>
