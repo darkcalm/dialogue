@@ -81,12 +81,7 @@ async function ensureReady(): Promise<string | null> {
 
 function generateLinksText(links: any[]): string {
   return links
-    .map((link) => {
-      const date = new Date(link.timestamp).toLocaleDateString()
-      const channel = link.channelName || 'unknown'
-      const author = link.authorName || 'unknown'
-      return `${link.url} | #${channel} | ${author} | ${date}`
-    })
+    .map((link) => link.url)
     .join('\n')
 }
 
