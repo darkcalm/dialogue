@@ -128,4 +128,18 @@ void (async () => {
       console.error('✗ Background cache sync failed:', error instanceof Error ? error.message : 'Unknown error')
     }
   }, SYNC_INTERVAL_MS)
+
+  // Start periodic links sync (extracts links from archived messages)
+  const LINKS_SYNC_INTERVAL_MS = 60000 // 60 seconds (1 minute)
+  console.log(`Starting periodic links sync every ${LINKS_SYNC_INTERVAL_MS / 1000}s...`)
+  setInterval(async () => {
+    try {
+      const { added, total } = await syncLinksFromCache()
+      if (added > 0) {
+        console.log(`✓ Links sync: ${added} new links added (${total} total)`)
+      }
+    } catch (error) {
+      console.error('✗ Links sync failed:', error instanceof Error ? error.message : 'Unknown error')
+    }
+  }, LINKS_SYNC_INTERVAL_MS)
 })()
