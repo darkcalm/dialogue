@@ -1,17 +1,25 @@
 /**
  * Turso database module for message archival
  * Stores Discord messages in cloud SQLite (libSQL)
+ * Supports local cache via embedded replica for fast reads
  */
 
 import { createClient, Client } from '@libsql/client'
+import { getCacheClient, hasLocalCache } from './local-cache'
 
 // Database client (lazy initialized)
 let client: Client | null = null
+let useLocalCache = false
 
 /**
  * Get or create the database client
  */
 function getClient(): Client {
+  // If local cache mode is enabled and cache exists, use it
+  if (useLocalCache && hasLocalCache()) {
+    return getCacheClient()
+  }
+
   if (client) return client
 
   const url = process.env.TURSO_DB_URL
@@ -27,6 +35,20 @@ function getClient(): Client {
   })
 
   return client
+}
+
+/**
+ * Enable local cache mode for reads
+ */
+export function enableLocalCacheMode(): void {
+  useLocalCache = true
+}
+
+/**
+ * Disable local cache mode (use remote directly)
+ */
+export function disableLocalCacheMode(): void {
+  useLocalCache = false
 }
 
 /**

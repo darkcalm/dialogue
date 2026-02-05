@@ -33,7 +33,9 @@ import {
   getMessagesSinceTimestamp,
   getNewestMessageTimestamp,
   getMessagesFromArchive,
+  enableLocalCacheMode,
 } from './db'
+import { initDBWithCache, hasLocalCache, syncCache } from './local-cache'
 import config from '@/helpers/env'
 
 // Lock file to detect if archive is running
@@ -600,36 +602,69 @@ async function main() {
 
     if (selectedPlatform === 'discord') {
       // Discord: use archive for data, connect live for sending
-      // Ensure archive process is running
-      if (!isArchiveRunning()) {
-        console.log('🚀 Starting archive service in background...')
-        spawnArchiveProcess()
+      // Use local cache for fast startup, sync in background
+      const hasCachedData = hasLocalCache()
 
-        // Wait for archive to start and have some data
-        console.log('⏳ Waiting for archive to initialize...')
-        await initDB()
-        const hasData = await waitForArchiveData(60000) // Wait up to 60 seconds
+      if (hasCachedData) {
+        // Fast path: use local cache immediately
+        console.log('💾 Loading from local cache...')
+        const start = Date.now()
+        await initDBWithCache() // Syncs if cache is stale
+        enableLocalCacheMode()
+        const elapsed = Date.now() - start
+        console.log(`✅ Cache ready in ${elapsed}ms`)
 
-        if (!hasData) {
-          console.log('⚠️  Archive is starting but no data yet. Please wait and try again.')
-          process.exit(1)
-        }
+        // Build inbox from cache immediately
+        console.log('📥 Loading inbox...')
+        inboxData = await buildInboxFromArchive(collapsedSections)
+
+        // Connect to Discord in parallel
+        console.log(`🔌 Connecting to ${selectedPlatform}...`)
+        platformClient = await createPlatformClient(selectedPlatform)
+        await platformClient.connect()
+        console.log('✅ Connected!')
+        botUserId = platformClient.getCurrentUser()?.id
+
+        // Rebuild inbox with bot user ID for mention detection
+        inboxData = await buildInboxFromArchive(collapsedSections, botUserId)
       } else {
-        console.log('📚 Archive service is running')
-        await initDB()
+        // First run: need to sync from Turso
+        // Ensure archive process is running
+        if (!isArchiveRunning()) {
+          console.log('🚀 Starting archive service in background...')
+          spawnArchiveProcess()
+
+          // Wait for archive to start and have some data
+          console.log('⏳ Waiting for archive to initialize...')
+          await initDB()
+          const hasData = await waitForArchiveData(60000) // Wait up to 60 seconds
+
+          if (!hasData) {
+            console.log('⚠️  Archive is starting but no data yet. Please wait and try again.')
+            process.exit(1)
+          }
+        } else {
+          console.log('📚 Archive service is running')
+          await initDB()
+        }
+
+        // Initialize local cache from Turso
+        console.log('📥 Downloading archive to local cache...')
+        await initDBWithCache({ forceSync: true })
+        enableLocalCacheMode()
+
+        // Connect to Discord for sending messages
+        console.log(`🔌 Connecting to ${selectedPlatform}...`)
+        platformClient = await createPlatformClient(selectedPlatform)
+        await platformClient.connect()
+        console.log('✅ Connected!')
+
+        botUserId = platformClient.getCurrentUser()?.id
+
+        // Build inbox from archive
+        console.log('📥 Loading inbox from archive...')
+        inboxData = await buildInboxFromArchive(collapsedSections, botUserId)
       }
-
-      // Connect to Discord for sending messages
-      console.log(`🔌 Connecting to ${selectedPlatform}...`)
-      platformClient = await createPlatformClient(selectedPlatform)
-      await platformClient.connect()
-      console.log('✅ Connected!')
-
-      botUserId = platformClient.getCurrentUser()?.id
-
-      // Build inbox from archive
-      console.log('📥 Loading inbox from archive...')
-      inboxData = await buildInboxFromArchive(collapsedSections, botUserId)
     } else {
       // WhatsApp: connect live for everything
       console.log(`🔌 Connecting to ${selectedPlatform}...`)
