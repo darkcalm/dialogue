@@ -4,6 +4,9 @@
  */
 
 import 'dotenv/config'
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
 import {
   syncLinksFromCache,
   getLinks,
@@ -32,7 +35,16 @@ async function main() {
 
   switch (command) {
     case 'sync': {
-      console.log('🔗 Syncing links database...')
+      const fullSync = args.includes('--full')
+      if (fullSync) {
+        const syncFile = path.join(os.homedir(), '.dialogue-cache', 'links-last-sync.txt')
+        if (fs.existsSync(syncFile)) {
+          fs.unlinkSync(syncFile)
+        }
+        console.log('🔗 Full re-sync of links database...')
+      } else {
+        console.log('🔗 Syncing links database...')
+      }
       const { added, total } = await syncLinksFromCache()
       console.log(`✅ Added ${added} new link entries`)
       console.log(`📊 Total links in database: ${total}`)
