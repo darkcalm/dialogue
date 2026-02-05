@@ -7,15 +7,17 @@ import { createClient, Client } from '@libsql/client'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { getCacheClient, hasLocalCache } from './local-cache'
+import { hasLocalCache } from './local-cache'
 
 // Links database directory (same as cache dir)
 const CACHE_DIR = path.join(os.homedir(), '.dialogue-cache')
 const LINKS_DB_PATH = path.join(CACHE_DIR, 'links.db')
 const LINKS_SYNC_FILE = path.join(CACHE_DIR, 'links-last-sync.txt')
+const ARCHIVE_DB_PATH = path.join(CACHE_DIR, 'archive.db')
 
-// Database client (lazy initialized)
+// Database clients (lazy initialized)
 let linksClient: Client | null = null
+let archiveClient: Client | null = null
 
 // URL regex pattern - matches http(s) URLs
 const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi
@@ -42,6 +44,21 @@ function getLinksClient(): Client {
   })
 
   return linksClient
+}
+
+/**
+ * Get or create the archive database client (direct file, no remote sync)
+ */
+function getArchiveClient(): Client {
+  if (archiveClient) return archiveClient
+
+  ensureCacheDir()
+
+  archiveClient = createClient({
+    url: `file:${ARCHIVE_DB_PATH}`,
+  })
+
+  return archiveClient
 }
 
 /**
@@ -165,14 +182,17 @@ export async function syncLinksFromCache(): Promise<{ added: number; total: numb
 
   await initLinksDB()
 
-  const cacheDb = getCacheClient()
+  const cacheDb = getArchiveClient()
   const linksDb = getLinksClient()
 
   // Get last sync time to only process new messages
   const lastSync = getLastLinksSyncTime()
-  const lastSyncISO = lastSync?.toISOString() || '1970-01-01T00:00:00.000Z'
+  // For first sync or if linksDB is empty, use epoch. Otherwise use last sync time.
+  const linkCountResult = await linksDb.execute(`SELECT COUNT(*) as count FROM links`)
+  const hasExistingLinks = Number(linkCountResult.rows[0].count) > 0
+  const lastSyncISO = (lastSync && hasExistingLinks) ? lastSync.toISOString() : '1970-01-01T00:00:00.000Z'
 
-  console.log(lastSync ? `🔄 Syncing links since ${lastSync.toISOString()}...` : '📥 Initial links extraction...')
+  console.log(lastSync && hasExistingLinks ? `🔄 Syncing links since ${lastSync.toISOString()}...` : '📥 Initial links extraction...')
 
   // Query messages that have links (content contains http)
   // Join with channels to get channel/guild info
@@ -206,6 +226,8 @@ export async function syncLinksFromCache(): Promise<{ added: number; total: numb
     `,
     args: [lastSyncISO],
   })
+
+  console.log(`📊 Found ${result.rows.length} messages with links since ${lastSyncISO}`)
 
   let addedCount = 0
   const now = new Date().toISOString()
