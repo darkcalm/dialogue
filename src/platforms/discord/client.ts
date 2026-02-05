@@ -99,21 +99,32 @@ export class DiscordPlatformClient implements IPlatformClient {
           // For text channels, also fetch their threads (active and archived)
           if (channel instanceof TextChannel) {
             try {
-              // Fetch active threads
-              const activeThreads = await channel.threads.fetchActive()
-              for (const thread of activeThreads.threads.values()) {
-                channels.push(adaptDiscordChannel(thread))
+              // Fetch all thread types in parallel for better performance
+              const [activeResult, archivedPublicResult, archivedPrivateResult] = await Promise.allSettled([
+                channel.threads.fetchActive(),
+                channel.threads.fetchArchived({ type: 'public' }),
+                channel.threads.fetchArchived({ type: 'private' }),
+              ])
+
+              // Process active threads
+              if (activeResult.status === 'fulfilled') {
+                for (const thread of activeResult.value.threads.values()) {
+                  channels.push(adaptDiscordChannel(thread))
+                }
               }
 
-              // Fetch archived threads (public and private)
-              const archivedPublic = await channel.threads.fetchArchived({ type: 'public' })
-              for (const thread of archivedPublic.threads.values()) {
-                channels.push(adaptDiscordChannel(thread))
+              // Process archived public threads
+              if (archivedPublicResult.status === 'fulfilled') {
+                for (const thread of archivedPublicResult.value.threads.values()) {
+                  channels.push(adaptDiscordChannel(thread))
+                }
               }
 
-              const archivedPrivate = await channel.threads.fetchArchived({ type: 'private' })
-              for (const thread of archivedPrivate.threads.values()) {
-                channels.push(adaptDiscordChannel(thread))
+              // Process archived private threads
+              if (archivedPrivateResult.status === 'fulfilled') {
+                for (const thread of archivedPrivateResult.value.threads.values()) {
+                  channels.push(adaptDiscordChannel(thread))
+                }
               }
             } catch (error) {
               // Thread fetching may fail for channels without thread permissions

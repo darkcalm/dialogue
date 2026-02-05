@@ -43,6 +43,7 @@ const MAX_DELAY_MS = 8000 // 8 seconds maximum between fetches
 // Lock file to indicate archive is running
 const ARCHIVE_LOCK_FILE = path.join(os.homedir(), '.dialogue-archive.lock')
 const ARCHIVE_TIMESTAMP_FILE = path.join(os.homedir(), '.dialogue-archive-timestamp.txt')
+const ARCHIVE_LOG_FILE = path.join(os.homedir(), '.dialogue-archive.log')
 
 // State
 let isRunning = true
@@ -126,6 +127,38 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Process items in parallel with concurrency limit
+ */
+async function processConcurrently<T, R>(
+  items: T[],
+  concurrency: number,
+  processor: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = []
+  const executing: Promise<void>[] = []
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    const promise = processor(item, i).then((result) => {
+      results[i] = result
+    })
+
+    executing.push(promise)
+
+    if (executing.length >= concurrency) {
+      await Promise.race(executing)
+      executing.splice(
+        executing.findIndex((p) => p === promise),
+        1
+      )
+    }
+  }
+
+  await Promise.all(executing)
+  return results
+}
+
+/**
  * Convert platform message to database message record
  */
 function messageToRecord(msg: IPlatformMessage): MessageRecord {
@@ -165,11 +198,19 @@ function channelToRecord(ch: IPlatformChannel): ChannelRecord {
 }
 
 /**
- * Log with timestamp
+ * Log with timestamp - writes to both console and log file
  */
 function log(message: string): void {
   const timestamp = new Date().toLocaleTimeString()
-  console.log(`[${timestamp}] ${message}`)
+  const logLine = `[${timestamp}] ${message}`
+  console.log(logLine)
+
+  // Also write to log file for --status to tail
+  try {
+    fs.appendFileSync(ARCHIVE_LOG_FILE, logLine + '\n')
+  } catch {
+    // Ignore file write errors
+  }
 }
 
 /**
@@ -263,57 +304,88 @@ async function catchUpMissedMessages(client: DiscordPlatformClient, channels: IP
 
   const channelMap = new Map(channels.map((ch) => [ch.id, ch]))
   let totalNewMessages = 0
-  let processedChannels = 0
 
-  for (const channelId of channelsWithMessages) {
+  // Parallel fetch, batched write approach
+  const FETCH_BATCH_SIZE_CHANNELS = 10 // Fetch from 10 channels at once
+
+  log(`Processing ${channelsWithMessages.length} channels in batches of ${FETCH_BATCH_SIZE_CHANNELS}...`)
+
+  // Process in batches
+  for (let i = 0; i < channelsWithMessages.length; i += FETCH_BATCH_SIZE_CHANNELS) {
     if (!isRunning) break
 
-    processedChannels++
-    const channel = channelMap.get(channelId)
-    if (!channel) continue
+    const batch = channelsWithMessages.slice(i, i + FETCH_BATCH_SIZE_CHANNELS)
+    const batchNum = Math.floor(i / FETCH_BATCH_SIZE_CHANNELS) + 1
+    const totalBatches = Math.ceil(channelsWithMessages.length / FETCH_BATCH_SIZE_CHANNELS)
 
-    // Log phase transition
-    if (priorityChannels.length > 0 && processedChannels === priorityChannels.length + 1) {
-      log(`Priority channels complete. Continuing with remaining channels...`)
+    log(`Batch ${batchNum}/${totalBatches}: Fetching from ${batch.length} channels in parallel...`)
+
+    // Fetch from all channels in this batch concurrently
+    const fetchResults = await Promise.allSettled(
+      batch.map(async (channelId, batchIndex) => {
+        const globalIndex = i + batchIndex
+        const channel = channelMap.get(channelId)
+        if (!channel) return null
+
+        // Log phase transition
+        if (priorityChannels.length > 0 && globalIndex === priorityChannels.length) {
+          log(`Priority channels complete. Continuing with remaining channels...`)
+        }
+
+        const isPriority = globalIndex < priorityChannels.length
+        const prefix = isPriority ? '🔥' : '  '
+
+        try {
+          const startTime = Date.now()
+          const recentMessages = await client.getMessages(channelId, FETCH_BATCH_SIZE)
+          const fetchTime = Date.now() - startTime
+
+          if (recentMessages.length === 0) {
+            log(`  ${prefix} #${channel.name}: 0 messages (${fetchTime}ms)`)
+            return null
+          }
+
+          // Show first and last message timestamps for debugging
+          const firstMsg = recentMessages[0]
+          const lastMsg = recentMessages[recentMessages.length - 1]
+          log(`  ${prefix} #${channel.name}: fetched ${recentMessages.length} messages (${fetchTime}ms)`)
+          log(`      └─ Range: ${new Date(firstMsg.timestamp).toISOString()} to ${new Date(lastMsg.timestamp).toISOString()}`)
+          log(`      └─ IDs: ${firstMsg.id} to ${lastMsg.id}`)
+          return { channel, messages: recentMessages }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error)
+          log(`  ${prefix} #${channel.name}: Error - ${errorMessage}`)
+          return null
+        }
+      })
+    )
+
+    // Collect all successfully fetched messages
+    const allMessages: MessageRecord[] = []
+    for (const result of fetchResults) {
+      if (result.status === 'fulfilled' && result.value) {
+        const records = result.value.messages.map(messageToRecord)
+        allMessages.push(...records)
+      }
     }
 
-    // Log each channel being processed
-    const isPriority = processedChannels <= priorityChannels.length
-    const prefix = isPriority ? '🔥' : '  '
-    log(`  ${prefix} [${processedChannels}/${channelsWithMessages.length}] Catching up #${channel.name}...`)
-
-    try {
-      const startTime = Date.now()
-      // Fetch the most recent messages from Discord
-      const recentMessages = await client.getMessages(channelId, FETCH_BATCH_SIZE)
-      const fetchTime = Date.now() - startTime
-
-      if (recentMessages.length === 0) {
-        log(`    → 0 messages (${fetchTime}ms)`)
-        continue
+    // Single database write for the entire batch
+    if (allMessages.length > 0) {
+      try {
+        const saveStart = Date.now()
+        await saveMessages(allMessages)
+        const saveTime = Date.now() - saveStart
+        totalNewMessages += allMessages.length
+        log(`  💾 Saved ${allMessages.length} messages to database (${saveTime}ms)`)
+      } catch (saveError) {
+        const saveErrorMsg = saveError instanceof Error ? saveError.message : String(saveError)
+        log(`  ✗ Database error: Failed to save ${allMessages.length} messages - ${saveErrorMsg}`)
       }
+    }
 
-      // Filter to only messages we don't have yet - use saveMessages with ON CONFLICT
-      // to avoid individual messageExists checks
-      const records = recentMessages.map(messageToRecord)
-      const saveStart = Date.now()
-      await saveMessages(records)
-      const saveTime = Date.now() - saveStart
-      
-      log(`    → ${recentMessages.length} messages fetched (${fetchTime}ms fetch, ${saveTime}ms save)`)
-      
-      // Count actual new messages by checking what was inserted vs updated
-      // For now, just log that we processed the channel
-      const newCount = recentMessages.length
-      if (newCount > 0) {
-        totalNewMessages += newCount
-      }
-
-      // Small delay between channels
+    // Small delay between batches
+    if (i + FETCH_BATCH_SIZE_CHANNELS < channelsWithMessages.length) {
       await sleep(500)
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      log(`  Error catching up #${channel.name}: ${errorMessage}`)
     }
   }
 
@@ -325,51 +397,107 @@ async function catchUpMissedMessages(client: DiscordPlatformClient, channels: IP
 }
 
 /**
- * Main backfill loop - round-robin through channels
+ * Main backfill loop - parallel fetch, batched write
  */
 async function runBackfillLoop(client: DiscordPlatformClient, channels: IPlatformChannel[]): Promise<void> {
   // Track which channels still have more history to fetch
   const activeChannels = new Set(channels.map((ch) => ch.id))
   const channelMap = new Map(channels.map((ch) => [ch.id, ch]))
-  const lastProgressByChannel = new Map<string, number>()
 
   log(`Starting backfill for ${activeChannels.size} channels...`)
 
   let consecutiveNoProgress = 0
   const maxConsecutiveNoProgress = 3
+  const BACKFILL_BATCH_SIZE = 5 // Fetch from 5 channels at once
 
   while (isRunning && activeChannels.size > 0) {
-    let madeProgress = false
+    const channelsToProcess = Array.from(activeChannels).slice(0, BACKFILL_BATCH_SIZE)
 
-    for (const channelId of Array.from(activeChannels)) {
-      if (!isRunning) break
+    log(`Backfilling ${channelsToProcess.length} channels in parallel...`)
 
-      const channel = channelMap.get(channelId)
-      if (!channel) continue
+    // Fetch from multiple channels concurrently
+    const fetchResults = await Promise.allSettled(
+      channelsToProcess.map(async (channelId) => {
+        const channel = channelMap.get(channelId)
+        if (!channel) return null
 
-      const statsBefore = await getTotalStats()
-      const hasMore = await backfillChannel(client, channel)
+        const oldestId = await getOldestMessageId(channel.id)
+        const status = await getChannelBackfillStatus(channel.id)
 
-      const statsAfter = await getTotalStats()
-      const messageCountChanged = statsAfter.totalMessages > statsBefore.totalMessages
+        if (status?.oldestFetchedId === 'COMPLETE') {
+          return { channelId, hasMore: false, messages: [] }
+        }
 
-      if (!hasMore) {
-        activeChannels.delete(channelId)
-        lastProgressByChannel.delete(channelId)
-      } else if (messageCountChanged) {
-        madeProgress = true
-        lastProgressByChannel.set(channelId, statsAfter.totalMessages)
+        try {
+          let messages: IPlatformMessage[]
+          if (oldestId) {
+            messages = await client.getMessagesBefore(channel.id, oldestId, FETCH_BATCH_SIZE)
+          } else {
+            messages = await client.getMessages(channel.id, FETCH_BATCH_SIZE)
+          }
+
+          const hasMore = messages.length === FETCH_BATCH_SIZE
+
+          if (messages.length === 0) {
+            await updateChannelOldestFetched(channel.id, 'COMPLETE')
+            log(`  ✓ #${channel.name}: Backfill complete`)
+            return { channelId, hasMore: false, messages: [] }
+          }
+
+          // Show message range for debugging
+          const firstMsg = messages[0]
+          const lastMsg = messages[messages.length - 1]
+          log(`  📥 #${channel.name}: Fetched ${messages.length} messages`)
+          log(`      └─ Range: ${new Date(firstMsg.timestamp).toISOString()} to ${new Date(lastMsg.timestamp).toISOString()}`)
+          log(`      └─ IDs: ${firstMsg.id} to ${lastMsg.id}`)
+          return { channelId, hasMore, messages, channelName: channel.name }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error)
+          log(`  ✗ #${channel.name}: ${errorMessage}`)
+          return { channelId, hasMore: false, messages: [] }
+        }
+      })
+    )
+
+    // Collect all messages and update channel states
+    const allMessages: MessageRecord[] = []
+    let batchMadeProgress = false
+
+    for (const result of fetchResults) {
+      if (result.status === 'fulfilled' && result.value) {
+        const { channelId, hasMore, messages, channelName } = result.value
+
+        if (!hasMore) {
+          activeChannels.delete(channelId)
+          if (messages.length === 0) {
+            await updateChannelOldestFetched(channelId, 'COMPLETE')
+          }
+        } else if (messages.length > 0) {
+          batchMadeProgress = true
+        }
+
+        if (messages.length > 0) {
+          const records = messages.map(messageToRecord)
+          allMessages.push(...records)
+        }
       }
+    }
 
-      // Random delay between fetches to avoid rate limits
-      if (isRunning && activeChannels.size > 0) {
-        const delay = randomDelay()
-        await sleep(delay)
+    // Single database write for all channels in this batch
+    if (allMessages.length > 0) {
+      try {
+        const saveStart = Date.now()
+        await saveMessages(allMessages)
+        const saveTime = Date.now() - saveStart
+        log(`  💾 Saved ${allMessages.length} messages (${saveTime}ms)`)
+      } catch (saveError) {
+        const saveErrorMsg = saveError instanceof Error ? saveError.message : String(saveError)
+        log(`  ✗ Database error: ${saveErrorMsg}`)
       }
     }
 
     // Check for stalled backfill
-    if (!madeProgress) {
+    if (!batchMadeProgress) {
       consecutiveNoProgress++
       if (consecutiveNoProgress >= maxConsecutiveNoProgress) {
         log(`⚠️  No progress for ${maxConsecutiveNoProgress} iterations. Stopping backfill.`)
@@ -383,6 +511,11 @@ async function runBackfillLoop(client: DiscordPlatformClient, channels: IPlatfor
     if (activeChannels.size > 0) {
       const stats = await getTotalStats()
       log(`Progress: ${stats.totalMessages} messages archived, ${activeChannels.size} channels remaining`)
+    }
+
+    // Delay between batches
+    if (isRunning && activeChannels.size > 0) {
+      await sleep(2000)
     }
   }
 
@@ -552,57 +685,41 @@ export async function refillTimeRange(
 }
 
 /**
- * Show archive status and exit
+ * Show live archive output
  */
 async function showStatus(searchTerm?: string, threadsOnly: boolean = false): Promise<void> {
-  await initDB()
-  const stats = await getTotalStats()
-  let channelStats = await getChannelStats()
-
-  // Filter by search term if provided
-  if (searchTerm) {
-    const lowerSearch = searchTerm.toLowerCase()
-    channelStats = channelStats.filter(ch =>
-      ch.name.toLowerCase().includes(lowerSearch)
-    )
+  // Check if archive is running
+  if (!isArchiveRunning()) {
+    console.log('Archive service is not running.')
+    console.log('\nStart it with: npm run archive')
+    process.exit(0)
   }
 
-  // Filter to threads only if requested
-  if (threadsOnly) {
-    channelStats = channelStats.filter(ch =>
-      ch.type && (ch.type.includes('THREAD') || ch.type.includes('Thread'))
-    )
+  const pid = fs.readFileSync(ARCHIVE_LOCK_FILE, 'utf-8').trim()
+  console.log(`Archive service is running (PID ${pid})`)
+  console.log('Showing live output (Ctrl+C to exit)...\n')
+  console.log('─'.repeat(80))
+
+  // Check if log file exists
+  if (!fs.existsSync(ARCHIVE_LOG_FILE)) {
+    console.log('Log file not found yet. Archive may be starting up...')
+    console.log(`Waiting for log file: ${ARCHIVE_LOG_FILE}`)
   }
 
-  console.log('\nArchive Status\n')
-  console.log(`Total messages: ${stats.totalMessages.toLocaleString()}`)
-  console.log(`Total channels: ${stats.totalChannels}`)
-  console.log(`Backfill: ${stats.channelsComplete} complete, ${stats.channelsInProgress} in progress`)
-  console.log(`Running: ${isArchiveRunning() ? 'yes (PID ' + fs.readFileSync(ARCHIVE_LOCK_FILE, 'utf-8').trim() + ')' : 'no'}`)
+  // Tail the log file
+  const tail = spawn('tail', ['-f', '-n', '50', ARCHIVE_LOG_FILE], {
+    stdio: 'inherit'
+  })
 
-  if (channelStats.length > 0) {
-    const displayLimit = searchTerm ? channelStats.length : 20
-    const title = searchTerm
-      ? `\nChannels matching "${searchTerm}" (${channelStats.length} found):`
-      : '\nChannels:'
-    console.log(title)
+  // Handle Ctrl+C to exit gracefully
+  process.on('SIGINT', () => {
+    tail.kill()
+    console.log('\n\nExited status view. Archive is still running in background.')
+    process.exit(0)
+  })
 
-    for (const ch of channelStats.slice(0, displayLimit)) {
-      const status = ch.backfillComplete ? '✓' : '…'
-      const isThread = ch.type && (ch.type.includes('THREAD') || ch.type.includes('Thread'))
-      const prefix = isThread ? '🧵' : '#'
-      console.log(`  ${status} ${prefix}${ch.name}: ${ch.messageCount.toLocaleString()} messages`)
-    }
-
-    if (!searchTerm && channelStats.length > 20) {
-      console.log(`  ... and ${channelStats.length - 20} more`)
-      console.log(`\nTip: Use --status=<search> to filter channels (e.g., --status=crypto)`)
-    }
-  } else if (searchTerm) {
-    console.log(`\nNo channels found matching "${searchTerm}"`)
-  }
-
-  closeDB()
+  // Keep the process alive
+  await new Promise(() => {})
 }
 
 /**
@@ -777,6 +894,13 @@ async function main(): Promise<void> {
 
   // Write lock file
   writeLockFile()
+
+  // Clear old log file
+  try {
+    fs.writeFileSync(ARCHIVE_LOG_FILE, '')
+  } catch {
+    // Ignore errors
+  }
 
   // Initialize database
   log('Initializing database...')

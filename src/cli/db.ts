@@ -118,11 +118,15 @@ async function executeDualWrite(statement: any): Promise<void> {
  */
 async function executeBatchDualWrite(statements: any[]): Promise<void> {
   const errors: string[] = []
+  let tursoSuccess = false
+  let cacheSuccess = false
 
   // Try writing to Turso
   if (client) {
     try {
-      await client.batch(statements)
+      const result = await client.batch(statements)
+      tursoSuccess = true
+      console.log(`🔵 Turso: Wrote ${statements.length} statements, result:`, JSON.stringify(result).substring(0, 200))
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error'
       errors.push(`Turso batch write failed: ${msg}`)
@@ -133,13 +137,17 @@ async function executeBatchDualWrite(statements: any[]): Promise<void> {
   // Try writing to local cache
   if (cacheClient) {
     try {
-      await cacheClient.batch(statements)
+      const result = await cacheClient.batch(statements)
+      cacheSuccess = true
+      console.log(`🟢 Local cache: Wrote ${statements.length} statements`)
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error'
       errors.push(`Local cache batch write failed: ${msg}`)
       console.error(`⚠️  Local cache batch write failed: ${msg}`)
     }
   }
+
+  console.log(`📊 Batch write summary: ${statements.length} statements | Turso: ${tursoSuccess ? '✓' : '✗'} | Cache: ${cacheSuccess ? '✓' : '✗'}`)
 
   // If both failed, throw error
   if (errors.length === 2) {
