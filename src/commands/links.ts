@@ -1,4 +1,4 @@
-import { ChatInputCommandInteraction, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js'
+import { ChatInputCommandInteraction, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } from 'discord.js'
 import { SlashCommandBuilder } from '@discordjs/builders'
 import {
   initLinksDB,
@@ -10,8 +10,8 @@ import {
 import { initDBWithCache, hasLocalCache } from '@/cli/local-cache'
 import { enableLocalCacheMode } from '@/cli/db'
 
-// Store search results for pagination
-const searchCache = new Map<string, { links: any[]; urlPattern?: string; channelFilter?: string }>()
+// Store search results for copy functionality
+const searchCache = new Map<string, string>()
 
 export const data = new SlashCommandBuilder()
   .setName('links')
@@ -82,61 +82,25 @@ async function ensureReady(): Promise<string | null> {
   }
 }
 
-function createSearchEmbed(links: any[], page: number, pageSize: number, total: number, urlPattern?: string, channelFilter?: string) {
-  const start = (page - 1) * pageSize
-  const end = start + pageSize
-  const pageLinks = links.slice(start, end)
-  const totalPages = Math.ceil(total / pageSize)
-
-  let title = `🔍 ${total} Link${total === 1 ? '' : 's'}`
-  if (urlPattern && channelFilter) {
-    title += ` (URL: "${urlPattern}", Channel: "${channelFilter}")`
-  } else if (urlPattern) {
-    title += ` (URL: "${urlPattern}")`
-  } else if (channelFilter) {
-    title += ` (Channel: "${channelFilter}")`
-  }
-
-  const embed = new EmbedBuilder()
-    .setTitle(title)
-    .setColor(0x57f287)
-    .setFooter({ text: `Page ${page} of ${totalPages}` })
-
-  const description = pageLinks
+function generateLinksText(links: any[]): string {
+  return links
     .map((link) => {
       const date = new Date(link.timestamp).toLocaleDateString()
       const channel = link.channelName || 'unknown'
-      const truncatedUrl = link.url.length > 60 ? link.url.substring(0, 57) + '...' : link.url
-      return `**${link.authorName}** in #${channel} (${date})\n🔗 ${truncatedUrl}`
+      const author = link.authorName || 'unknown'
+      return `${link.url} | #${channel} | ${author} | ${date}`
     })
-    .join('\n\n')
-
-  embed.setDescription(description.substring(0, 4096))
-
-  return { embed, totalPages }
+    .join('\n')
 }
 
-function createPaginationButtons(page: number, totalPages: number, cacheKey: string) {
+function createActionButtons(cacheKey: string) {
   const row = new ActionRowBuilder<ButtonBuilder>()
-
-  if (page > 1) {
-    row.addComponents(
+    .addComponents(
       new ButtonBuilder()
-        .setCustomId(`links_prev_${cacheKey}_${page}`)
-        .setLabel('← Previous')
-        .setStyle(ButtonStyle.Primary)
+        .setCustomId(`links_copy_${cacheKey}`)
+        .setLabel('📋 Copy Links')
+        .setStyle(ButtonStyle.Secondary)
     )
-  }
-
-  if (page < totalPages) {
-    row.addComponents(
-      new ButtonBuilder()
-        .setCustomId(`links_next_${cacheKey}_${page}`)
-        .setLabel('Next →')
-        .setStyle(ButtonStyle.Primary)
-    )
-  }
-
   return row
 }
 
@@ -230,9 +194,8 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
         const urlPattern = interaction.options.getString('url')
         const channelFilter = interaction.options.getString('channel')
-        const pageSize = interaction.options.getInteger('count') || 10
 
-        console.log(`🔍 Search: url="${urlPattern}", channel="${channelFilter}", pageSize=${pageSize}`)
+        console.log(`🔍 Search: url="${urlPattern}", channel="${channelFilter}"`)
 
         // Require at least one filter
         if (!urlPattern && !channelFilter) {
@@ -244,7 +207,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         const links = await getLinks({
           urlPattern: urlPattern || undefined,
           channelPattern: channelFilter || undefined,
-          limit: 1000 // Get all results for pagination
+          limit: 10000 // Get all results
         })
 
         if (links.length === 0) {
@@ -259,16 +222,35 @@ export async function execute(interaction: ChatInputCommandInteraction) {
           return interaction.editReply(msg)
         }
 
-        // Cache results for pagination - use stable key based on user + search params
-        const cacheKey = `${interaction.user.id}_${urlPattern || ''}_${channelFilter || ''}`
-        searchCache.set(cacheKey, { links, urlPattern: urlPattern || undefined, channelFilter: channelFilter || undefined })
+        // Generate text content and file
+        const linksText = generateLinksText(links)
+        const file = new AttachmentBuilder(Buffer.from(linksText, 'utf-8'), { name: 'links.txt' })
 
-        const { embed, totalPages } = createSearchEmbed(links, 1, pageSize, links.length, urlPattern || undefined, channelFilter || undefined)
-        const buttons = createPaginationButtons(1, totalPages, cacheKey)
+        // Cache for copy button
+        const cacheKey = `${interaction.user.id}_${urlPattern || ''}_${channelFilter || ''}`
+        searchCache.set(cacheKey, linksText)
+
+        // Create summary embed
+        let title = `🔍 Found ${links.length} Link${links.length === 1 ? '' : 's'}`
+        if (urlPattern && channelFilter) {
+          title += ` (URL: "${urlPattern}", Channel: "${channelFilter}")`
+        } else if (urlPattern) {
+          title += ` (URL: "${urlPattern}")`
+        } else if (channelFilter) {
+          title += ` (Channel: "${channelFilter}")`
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle(title)
+          .setColor(0x57f287)
+          .setDescription(`📥 Download **links.txt** below or use the Copy button`)
+
+        const buttons = createActionButtons(cacheKey)
 
         return interaction.editReply({
           embeds: [embed],
-          components: totalPages > 1 ? [buttons] : []
+          files: [file],
+          components: [buttons]
         })
       }
 
@@ -297,37 +279,31 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   }
 }
 
-// Handle button interactions for pagination
+// Handle button interactions for copy
 export async function handleButton(interaction: any) {
-  if (!interaction.customId.startsWith('links_')) return
+  if (!interaction.customId.startsWith('links_copy_')) return
 
   try {
-    const [, action, cacheKey, currentPage] = interaction.customId.split('_')
-    const page = parseInt(currentPage)
-    const nextPage = action === 'next' ? page + 1 : page - 1
+    const cacheKey = interaction.customId.replace('links_copy_', '')
+    const linksText = searchCache.get(cacheKey)
 
-    const cached = searchCache.get(cacheKey)
-    if (!cached) {
+    if (!linksText) {
       return interaction.reply({ content: '❌ Search cache expired. Run the search again.', ephemeral: true })
     }
 
-    const pageSize = 10
-    const { embed, totalPages } = createSearchEmbed(
-      cached.links,
-      nextPage,
-      pageSize,
-      cached.links.length,
-      cached.urlPattern,
-      cached.channelFilter
-    )
-    const buttons = createPaginationButtons(nextPage, totalPages, cacheKey)
+    // Create code block with the links
+    const codeBlock = '```\n' + linksText + '\n```'
+    const maxLength = 2000
 
-    await interaction.update({
-      embeds: [embed],
-      components: totalPages > 1 ? [buttons] : []
-    })
+    if (codeBlock.length > maxLength) {
+      // Too long for a message, send as file instead
+      const file = new AttachmentBuilder(Buffer.from(linksText, 'utf-8'), { name: 'links.txt' })
+      return interaction.reply({ files: [file], ephemeral: true })
+    }
+
+    interaction.reply({ content: codeBlock, ephemeral: true })
   } catch (err) {
     console.error('Button interaction error:', err)
-    interaction.reply({ content: '❌ Error handling pagination', ephemeral: true })
+    interaction.reply({ content: '❌ Error copying links', ephemeral: true })
   }
 }
