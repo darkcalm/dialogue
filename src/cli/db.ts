@@ -779,18 +779,48 @@ export async function deleteMessage(messageId: string): Promise<boolean> {
 /**
  * Delete messages in a time range for a channel
  * Returns the number of messages deleted
+ * In dual-write mode, deletes from both Turso and local cache
  */
 export async function deleteMessagesInTimeRange(
   channelId: string,
   startTime: string,
   endTime: string
 ): Promise<number> {
-  const db = getClient()
-  const result = await db.execute({
+  const statement = {
     sql: `DELETE FROM messages WHERE channel_id = ? AND timestamp >= ? AND timestamp <= ?`,
     args: [channelId, startTime, endTime],
-  })
-  return result.rowsAffected
+  }
+
+  let totalDeleted = 0
+
+  if (useDualWrite) {
+    // Delete from both Turso and local cache
+    if (client) {
+      try {
+        const result = await client.execute(statement)
+        totalDeleted = result.rowsAffected
+      } catch (error) {
+        console.error('Error deleting from Turso:', error)
+      }
+    }
+
+    if (cacheClient) {
+      try {
+        const result = await cacheClient.execute(statement)
+        // Use local cache count if Turso failed
+        if (totalDeleted === 0) totalDeleted = result.rowsAffected
+      } catch (error) {
+        console.error('Error deleting from local cache:', error)
+      }
+    }
+  } else {
+    // Single-write mode - only delete from Turso
+    const db = getClient()
+    const result = await db.execute(statement)
+    totalDeleted = result.rowsAffected
+  }
+
+  return totalDeleted
 }
 
 /**
