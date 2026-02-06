@@ -642,8 +642,9 @@ async function main() {
       }
 
       if (hasCachedData) {
-        // Fast path: use local cache immediately (bot handles sync)
-        console.log('💾 Loading from local cache...')
+        // Fast path: use local cache (sync if stale)
+        console.log('💾 Using local cache...')
+        await initDBWithCache() // Auto-syncs if cache is older than 1 minute
         enableLocalCacheMode()
 
         // Build inbox from cache immediately

@@ -79,6 +79,40 @@ export function enableDualWriteMode(): void {
 }
 
 /**
+ * Check if a SQL statement is a write operation
+ */
+function isWriteOperation(sql: string): boolean {
+  const normalized = sql.trim().toUpperCase()
+  return (
+    normalized.startsWith('INSERT') ||
+    normalized.startsWith('UPDATE') ||
+    normalized.startsWith('DELETE') ||
+    normalized.startsWith('REPLACE')
+  )
+}
+
+/**
+ * Smart execute - automatically uses dual-write for write operations
+ * For read operations, uses single database based on mode
+ */
+async function executeStatement(statement: any): Promise<any> {
+  const sql = typeof statement === 'string' ? statement : statement.sql
+
+  // Check if this is a write operation
+  if (isWriteOperation(sql)) {
+    // Write operation - use dual-write if enabled
+    if (useDualWrite) {
+      await executeDualWrite(statement)
+      return { rowsAffected: 0 } // Dual-write doesn't return rowsAffected reliably
+    }
+  }
+
+  // Read operation or non-dual-write mode - use single client
+  const db = getClient()
+  return await db.execute(statement)
+}
+
+/**
  * Execute a statement on both Turso and local cache (dual-write)
  * If one fails, still try the other and log error
  */
@@ -267,12 +301,7 @@ export async function saveChannel(channel: ChannelRecord): Promise<void> {
     ],
   }
 
-  if (useDualWrite) {
-    await executeDualWrite(statement)
-  } else {
-    const db = getClient()
-    await db.execute(statement)
-  }
+  await executeStatement(statement)
 }
 
 /**
@@ -476,8 +505,7 @@ export async function getChannelsWithMessagesAfter(timestamp: string): Promise<s
  * Update the oldest fetched message ID for a channel
  */
 export async function updateChannelOldestFetched(channelId: string, messageId: string | null): Promise<void> {
-  const db = getClient()
-  await db.execute({
+  await executeStatement({
     sql: `UPDATE channels SET oldest_fetched_id = ? WHERE id = ?`,
     args: [messageId, channelId],
   })
@@ -623,8 +651,7 @@ export async function channelExists(channelId: string): Promise<boolean> {
  * Used before saving real-time messages to satisfy foreign key constraint
  */
 export async function ensureChannelExists(channelId: string, channelName?: string): Promise<void> {
-  const db = getClient()
-  await db.execute({
+  await executeStatement({
     sql: `
       INSERT INTO channels (id, name, first_seen)
       VALUES (?, ?, ?)
@@ -830,12 +857,48 @@ export async function getMessageUrl(messageId: string): Promise<string | null> {
  * Delete a message from the database
  */
 export async function deleteMessage(messageId: string): Promise<boolean> {
-  const db = getClient()
-  const result = await db.execute({
+  const statement = {
     sql: `DELETE FROM messages WHERE id = ?`,
     args: [messageId],
-  })
-  return result.rowsAffected > 0
+  }
+
+  if (useDualWrite) {
+    // Delete from both Turso and local cache
+    let deletedFromEither = false
+    const errors: string[] = []
+
+    if (client) {
+      try {
+        const result = await client.execute(statement)
+        if (result.rowsAffected > 0) deletedFromEither = true
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : 'Unknown error'
+        errors.push(`Turso delete failed: ${msg}`)
+        console.error(`⚠️  Turso delete failed: ${msg}`)
+      }
+    }
+
+    if (cacheClient) {
+      try {
+        const result = await cacheClient.execute(statement)
+        if (result.rowsAffected > 0) deletedFromEither = true
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : 'Unknown error'
+        errors.push(`Local cache delete failed: ${msg}`)
+        console.error(`⚠️  Local cache delete failed: ${msg}`)
+      }
+    }
+
+    if (errors.length === 2) {
+      throw new Error(`Dual delete failed: ${errors.join('; ')}`)
+    }
+
+    return deletedFromEither
+  } else {
+    const db = getClient()
+    const result = await db.execute(statement)
+    return result.rowsAffected > 0
+  }
 }
 
 /**

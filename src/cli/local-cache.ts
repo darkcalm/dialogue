@@ -48,6 +48,12 @@ function getClient(): Client {
     authToken,
   })
 
+  // Increase busy timeout to handle concurrent writes better
+  // Default is 5 seconds, we increase to 30 seconds
+  client.execute('PRAGMA busy_timeout = 30000').catch(() => {
+    // Ignore errors - this is best-effort
+  })
+
   return client
 }
 
@@ -113,10 +119,20 @@ export async function initDBWithCache(options?: { forceSync?: boolean }): Promis
   if (shouldSync) {
     console.log(hasCache ? '🔄 Syncing with Turso...' : '📥 Downloading from Turso (first time)...')
     const start = Date.now()
-    await db.sync()
-    const elapsed = Date.now() - start
-    console.log(`✅ Synced in ${elapsed}ms`)
-    saveLastSyncTime()
+    try {
+      await db.sync()
+      const elapsed = Date.now() - start
+      console.log(`✅ Synced in ${elapsed}ms`)
+      saveLastSyncTime()
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      if (msg.includes('database is locked')) {
+        console.log('⚠️  Database is locked (another process using it), skipping sync')
+        console.log('   Dual-write will keep both databases in sync')
+      } else {
+        throw error
+      }
+    }
   } else {
     console.log('💾 Using local cache (synced recently)')
   }

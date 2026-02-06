@@ -444,6 +444,19 @@ async function runBackfillLoop(client: DiscordPlatformClient, channels: IPlatfor
             return { channelId, hasMore: false, messages: [] }
           }
 
+          // Check if we've hit messages we already have (overlap with catch-up)
+          // If all messages already exist, backfill has caught up
+          const existenceChecks = await Promise.all(
+            messages.slice(0, Math.min(5, messages.length)).map(msg => messageExists(msg.id))
+          )
+          const allExist = existenceChecks.every(exists => exists)
+
+          if (allExist) {
+            await updateChannelOldestFetched(channel.id, 'COMPLETE')
+            log(`  ✓ #${channel.name}: Backfill complete (caught up to existing messages)`)
+            return { channelId, hasMore: false, messages: [] }
+          }
+
           // Show message range for debugging
           const firstMsg = messages[0]
           const lastMsg = messages[messages.length - 1]
@@ -738,6 +751,59 @@ function parseDuration(duration: string): number {
 }
 
 /**
+ * Delete messages from the past N hours/days
+ */
+async function deleteRecentMessages(durationStr: string = '24h'): Promise<void> {
+  console.log('\nDiscord Message Archive - Delete Recent Messages\n')
+
+  const durationMs = parseDuration(durationStr)
+  const endTime = new Date()
+  const startTime = new Date(endTime.getTime() - durationMs)
+
+  log(`Will delete messages from ${startTime.toISOString()} to ${endTime.toISOString()}`)
+
+  // Initialize database
+  log('Initializing database...')
+  await initDB()
+
+  // Get all channels with messages in this time range
+  const activeChannelIds = await getChannelsWithActivityInTimeRange(
+    startTime.toISOString(),
+    endTime.toISOString()
+  )
+
+  if (activeChannelIds.length === 0) {
+    log('No channels had activity in the time range')
+    closeDB()
+    return
+  }
+
+  log(`Found ${activeChannelIds.length} channels with activity`)
+
+  let totalDeleted = 0
+
+  for (const channelId of activeChannelIds) {
+    try {
+      const deleted = await deleteMessagesInTimeRange(
+        channelId,
+        startTime.toISOString(),
+        endTime.toISOString()
+      )
+      totalDeleted += deleted
+      if (deleted > 0) {
+        log(`  Deleted ${deleted} messages from channel ${channelId}`)
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      log(`  Error on channel ${channelId}: ${errorMessage}`)
+    }
+  }
+
+  log(`\nTotal deleted: ${totalDeleted} messages`)
+  closeDB()
+}
+
+/**
  * Run refill for all channels for a given duration
  */
 async function runRefill(durationStr: string = '12h'): Promise<void> {
@@ -865,6 +931,20 @@ async function runRefill(durationStr: string = '12h'): Promise<void> {
  * Main entry point
  */
 async function main(): Promise<void> {
+  // Handle --sync flag
+  if (process.argv.includes('--sync')) {
+    if (isArchiveRunning()) {
+      console.log('❌ Archive is running. Stop it first:')
+      console.log('   pkill -f archive.mjs')
+      console.log('\nThen run: npm run archive -- --sync')
+      process.exit(1)
+    }
+    console.log('Syncing local cache from Turso...')
+    await initDBWithCache({ forceSync: true })
+    console.log('✅ Sync complete!')
+    process.exit(0)
+  }
+
   // Handle --status flag (with optional search term)
   const statusArg = process.argv.find((arg) => arg.startsWith('--status'))
   if (statusArg) {
@@ -872,6 +952,15 @@ async function main(): Promise<void> {
     const searchTerm = statusArg.includes('=') ? statusArg.split('=')[1] : undefined
     const threadsOnly = process.argv.includes('--threads')
     await showStatus(searchTerm, threadsOnly)
+    process.exit(0)
+  }
+
+  // Handle --delete-recent flag
+  const deleteRecentArg = process.argv.find((arg) => arg.startsWith('--delete-recent'))
+  if (deleteRecentArg) {
+    // Parse optional duration: --delete-recent or --delete-recent=24h
+    const duration = deleteRecentArg.includes('=') ? deleteRecentArg.split('=')[1] : '24h'
+    await deleteRecentMessages(duration)
     process.exit(0)
   }
 
@@ -954,8 +1043,16 @@ async function main(): Promise<void> {
     log(`Current archive: ${stats.totalMessages} messages in ${stats.totalChannels} channels`)
     log(`Backfill status: ${stats.channelsComplete} complete, ${stats.channelsInProgress} in progress`)
 
-    // Catch up on messages missed while offline
-    await catchUpMissedMessages(client, channels)
+    // Check for backfill-only mode
+    const backfillOnly = process.argv.includes('--backfill-only')
+
+    if (!backfillOnly) {
+      // Catch up on messages missed while offline
+      await catchUpMissedMessages(client, channels)
+    } else {
+      log('⏭️  Skipping catch-up phase (--backfill-only mode)')
+      log('📡 Real-time events are still captured (new messages, edits, deletes)')
+    }
 
     // Start the backfill loop
     await runBackfillLoop(client, channels)
