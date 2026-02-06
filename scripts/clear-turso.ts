@@ -23,17 +23,17 @@ async function main() {
     console.log('🗑️  Clearing Turso database...')
     console.log(`Database: ${url}`)
 
-    // Delete all data (keep tables)
-    await client.execute('DELETE FROM messages')
-    console.log('✅ Deleted messages')
+    // Drop all tables
+    await client.execute('DROP TABLE IF EXISTS messages')
+    console.log('✅ Dropped messages table')
 
-    await client.execute('DELETE FROM channels')
-    console.log('✅ Deleted channels')
+    await client.execute('DROP TABLE IF EXISTS channels')
+    console.log('✅ Dropped channels table')
 
-    await client.execute('DELETE FROM channel_events')
-    console.log('✅ Deleted channel_events')
+    await client.execute('DROP TABLE IF EXISTS channel_events')
+    console.log('✅ Dropped channel_events table')
 
-    console.log('✅ Turso cleared successfully')
+    console.log('✅ Turso tables dropped successfully')
   } catch (error) {
     console.error('❌ Error:', error)
     process.exit(1)

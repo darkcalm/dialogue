@@ -15,6 +15,7 @@
     "known": "npm run build:cli-esm && node dist-esm/known.mjs",
     "inbox": "npm run build:cli-esm && node dist-esm/inbox.mjs",
     "archive": "npm run build:cli-esm && node dist-esm/archive.mjs",
+    "realtime": "npx tsx src/cli/realtime.ts",
     "archive:whatsapp": "npm run build:cli-esm && node dist-esm/whatsapp-archive.mjs",
     "links": "npm run build:cli-esm && node dist-esm/links.mjs"
   },

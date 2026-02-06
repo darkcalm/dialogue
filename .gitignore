@@ -59,3 +59,4 @@ whatsapp-session/
 
 # Visit tracking data (contains channel IDs)
 .discord-cli-visits.json
+*.out

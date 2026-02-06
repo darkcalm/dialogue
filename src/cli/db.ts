@@ -305,6 +305,44 @@ export async function saveChannel(channel: ChannelRecord): Promise<void> {
 }
 
 /**
+ * Save multiple channels in a batch
+ */
+export async function saveChannels(channels: ChannelRecord[]): Promise<void> {
+  if (channels.length === 0) return
+
+  const statements = channels.map((channel) => ({
+    sql: `
+      INSERT INTO channels (id, name, guild_id, guild_name, parent_id, topic, type, first_seen)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        guild_id = COALESCE(excluded.guild_id, guild_id),
+        guild_name = COALESCE(excluded.guild_name, guild_name),
+        parent_id = COALESCE(excluded.parent_id, parent_id),
+        topic = COALESCE(excluded.topic, topic),
+        type = COALESCE(excluded.type, type)
+    `,
+    args: [
+      channel.id,
+      channel.name,
+      channel.guildId || null,
+      channel.guildName || null,
+      channel.parentId || null,
+      channel.topic || null,
+      channel.type || null,
+      new Date().toISOString(),
+    ],
+  }))
+
+  if (useDualWrite) {
+    await executeBatchDualWrite(statements)
+  } else {
+    const db = getClient()
+    await db.batch(statements, 'write')
+  }
+}
+
+/**
  * Message data for saving
  */
 export interface MessageRecord {
