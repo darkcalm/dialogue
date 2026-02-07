@@ -1,14 +1,14 @@
 import { ChatInputCommandInteraction, EmbedBuilder, AttachmentBuilder } from 'discord.js'
 import { SlashCommandBuilder } from '@discordjs/builders'
-import {
-  initLinksDB,
-  syncLinksFromCache,
-  getLinks,
-  getLinksStats,
-  hasLinksDB,
-} from '@/cli/links-db'
-import { initDBWithCache, hasLocalCache } from '@/cli/local-cache'
-import { enableLocalCacheMode } from '@/cli/db'
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
+import { initLinksDB, syncLinksFromCache, getLinks, getLinksStats, hasLinksDB, } from '@/cli/links-db'
+import { getClient, initDB } from '@/cli/db' // Import getClient and initDB
+
+const CACHE_DIR = path.join(os.homedir(), '.dialogue-cache')
+const REALTIME_DB_PATH = path.join(CACHE_DIR, 'realtime.db')
+const ARCHIVE_DB_PATH = path.join(CACHE_DIR, 'archive.db')
 
 export const data = new SlashCommandBuilder()
   .setName('links')
@@ -65,17 +65,17 @@ export const data = new SlashCommandBuilder()
   )
 
 async function ensureReady(): Promise<string | null> {
-  if (!hasLocalCache()) {
-    return 'No local cache available. The archive service needs to run first.'
+  // Check if primary local databases exist
+  if (!fs.existsSync(REALTIME_DB_PATH) && !fs.existsSync(ARCHIVE_DB_PATH)) {
+    return 'No local database found. The archive and realtime services need to run first to initialize them.'
   }
 
   try {
-    await initDBWithCache()
-    enableLocalCacheMode()
+    // Initialize links DB (which will create links.db)
     await initLinksDB()
     return null
   } catch (err) {
-    return `Failed to initialize: ${err instanceof Error ? err.message : 'Unknown error'}`
+    return `Failed to initialize links database: ${err instanceof Error ? err.message : 'Unknown error'}`
   }
 }
 
@@ -248,5 +248,3 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     )
   }
 }
-
-

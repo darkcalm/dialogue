@@ -1,201 +1,80 @@
 /**
- * Turso database module for message archival
- * Stores Discord messages in cloud SQLite (libSQL)
- *
- * Dual-write architecture for resilience:
- * - Archive service writes to BOTH Turso (remote) and local cache
- * - If one write fails, the other still succeeds (logged but not fatal)
- * - Bot service periodically syncs local cache from Turso as fallback
- * - Inbox reads from local cache for fast performance
+ * Database module for message archival, supporting separate realtime and archive databases.
+ * Each database can have a local (SQLite file) and remote (Turso) instance.
  */
 
 import { createClient, Client } from '@libsql/client'
-import { getCacheClient, hasLocalCache } from './local-cache'
+import * as path from 'path'
+import * as os from 'os'
+import * as fs from 'fs'
 
-// Database clients (lazy initialized)
-let client: Client | null = null // Turso remote client
-let cacheClient: Client | null = null // Local cache client
-let useLocalCache = false
-let useDualWrite = false // Write to both Turso and local cache
+const CACHE_DIR = path.join(os.homedir(), '.dialogue-cache')
+
+// Type definitions
+export type DbName = 'realtime' | 'archive'
+export type DbType = 'local' | 'remote'
+
+// Keep a cache of client instances
+const clients: Partial<Record<`${DbName}-${DbType}`, Client>> = {}
 
 /**
- * Get or create the database client
+ * Ensure the cache directory for local databases exists.
  */
-function getClient(): Client {
-  // If local cache mode is enabled and cache exists, use it
-  if (useLocalCache && hasLocalCache()) {
-    return getCacheClient()
+function ensureCacheDir(): void {
+  if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR, { recursive: true })
+  }
+}
+
+/**
+ * Get a database client for a specific database name and type.
+ * @param dbName The name of the database ('realtime' or 'archive').
+ * @param type The type of the database ('local' or 'remote').
+ * @returns A libSQL client instance.
+ */
+export function getClient(dbName: DbName, type: DbType): Client {
+  const clientKey = `${dbName}-${type}`
+  if (clients[clientKey]) {
+    return clients[clientKey]!
   }
 
-  if (client) return client
+  let url: string
+  let authToken: string | undefined
 
-  const url = process.env.TURSO_DB_URL
-  const authToken = process.env.TURSO_AUTH_TOKEN
-
-  if (!url) {
-    throw new Error('TURSO_DB_URL environment variable is required')
+  if (type === 'local') {
+    ensureCacheDir()
+    const dbPath = path.join(CACHE_DIR, `${dbName}.db`)
+    url = `file:${dbPath}`
+  } else { // remote
+    const urlVar = `${dbName.toUpperCase()}_TURSO_DB_URL`
+    const tokenVar = `${dbName.toUpperCase()}_TURSO_AUTH_TOKEN`
+    url = process.env[urlVar] || ''
+    authToken = process.env[tokenVar]
+    if (!url) {
+      throw new Error(`${urlVar} environment variable is required for remote database.`)
+    }
   }
 
-  client = createClient({
-    url,
-    authToken,
-  })
-
+  const client = createClient({ url, authToken })
+  clients[clientKey] = client
   return client
 }
 
 /**
- * Enable local cache mode for reads and writes
- * Writes go to local cache which syncs to Turso via embedded replica
+ * Close all active database connections.
  */
-export function enableLocalCacheMode(): void {
-  useLocalCache = true
-}
-
-/**
- * Disable local cache mode (use remote directly)
- */
-export function disableLocalCacheMode(): void {
-  useLocalCache = false
-}
-
-/**
- * Enable dual-write mode - writes go to both Turso and local cache
- * Provides resilience if one service is down
- */
-export function enableDualWriteMode(): void {
-  useDualWrite = true
-  // Ensure both clients are available
-  if (!client) {
-    const url = process.env.TURSO_DB_URL
-    const authToken = process.env.TURSO_AUTH_TOKEN
-    if (url) {
-      client = createClient({ url, authToken })
-    }
-  }
-  if (!cacheClient && hasLocalCache()) {
-    cacheClient = getCacheClient()
+export function closeAllDBs(): void {
+  for (const key in clients) {
+    clients[key as keyof typeof clients]?.close()
+    delete clients[key as keyof typeof clients]
   }
 }
 
 /**
- * Check if a SQL statement is a write operation
+ * Initialize the database schema for a given client.
+ * @param db The libSQL client to initialize.
  */
-function isWriteOperation(sql: string): boolean {
-  const normalized = sql.trim().toUpperCase()
-  return (
-    normalized.startsWith('INSERT') ||
-    normalized.startsWith('UPDATE') ||
-    normalized.startsWith('DELETE') ||
-    normalized.startsWith('REPLACE')
-  )
-}
-
-/**
- * Smart execute - automatically uses dual-write for write operations
- * For read operations, uses single database based on mode
- */
-async function executeStatement(statement: any): Promise<any> {
-  const sql = typeof statement === 'string' ? statement : statement.sql
-
-  // Check if this is a write operation
-  if (isWriteOperation(sql)) {
-    // Write operation - use dual-write if enabled
-    if (useDualWrite) {
-      await executeDualWrite(statement)
-      return { rowsAffected: 0 } // Dual-write doesn't return rowsAffected reliably
-    }
-  }
-
-  // Read operation or non-dual-write mode - use single client
-  const db = getClient()
-  return await db.execute(statement)
-}
-
-/**
- * Execute a statement on both Turso and local cache (dual-write)
- * If one fails, still try the other and log error
- */
-async function executeDualWrite(statement: any): Promise<void> {
-  const errors: string[] = []
-
-  // Try writing to Turso
-  if (client) {
-    try {
-      await client.execute(statement)
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error'
-      errors.push(`Turso write failed: ${msg}`)
-      console.error(`⚠️  Turso write failed: ${msg}`)
-    }
-  }
-
-  // Try writing to local cache
-  if (cacheClient) {
-    try {
-      await cacheClient.execute(statement)
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error'
-      errors.push(`Local cache write failed: ${msg}`)
-      console.error(`⚠️  Local cache write failed: ${msg}`)
-    }
-  }
-
-  // If both failed, throw error
-  if (errors.length === 2) {
-    throw new Error(`Dual write failed: ${errors.join('; ')}`)
-  }
-}
-
-/**
- * Execute batch statements on both Turso and local cache (dual-write)
- */
-async function executeBatchDualWrite(statements: any[]): Promise<void> {
-  const errors: string[] = []
-  let tursoSuccess = false
-  let cacheSuccess = false
-
-  // Try writing to Turso
-  if (client) {
-    try {
-      const result = await client.batch(statements)
-      tursoSuccess = true
-      console.log(`🔵 Turso: Wrote ${statements.length} statements, result:`, JSON.stringify(result).substring(0, 200))
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error'
-      errors.push(`Turso batch write failed: ${msg}`)
-      console.error(`⚠️  Turso batch write failed: ${msg}`)
-    }
-  }
-
-  // Try writing to local cache
-  if (cacheClient) {
-    try {
-      const result = await cacheClient.batch(statements)
-      cacheSuccess = true
-      console.log(`🟢 Local cache: Wrote ${statements.length} statements`)
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error'
-      errors.push(`Local cache batch write failed: ${msg}`)
-      console.error(`⚠️  Local cache batch write failed: ${msg}`)
-    }
-  }
-
-  console.log(`📊 Batch write summary: ${statements.length} statements | Turso: ${tursoSuccess ? '✓' : '✗'} | Cache: ${cacheSuccess ? '✓' : '✗'}`)
-
-  // If both failed, throw error
-  if (errors.length === 2) {
-    throw new Error(`Dual batch write failed: ${errors.join('; ')}`)
-  }
-}
-
-/**
- * Initialize the database connection and create tables if they don't exist
- */
-export async function initDB(): Promise<void> {
-  const db = getClient()
-
-  // Create tables
+export async function initDB(db: Client): Promise<void> {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS channels (
       id TEXT PRIMARY KEY,
@@ -231,8 +110,7 @@ export async function initDB(): Promise<void> {
       FOREIGN KEY (channel_id) REFERENCES channels(id)
     )
   `)
-
-  // Create channel events table for efficient refill queries
+  
   await db.execute(`
     CREATE TABLE IF NOT EXISTS channel_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -244,25 +122,10 @@ export async function initDB(): Promise<void> {
 
   // Create indexes
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id)`)
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_channel_events_timestamp ON channel_events(timestamp)`)
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_channel_events_channel_time ON channel_events(channel_id, timestamp)`)
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)`)
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_channel_timestamp ON messages(channel_id, timestamp)`)
 }
 
-/**
- * Close the database connection
- */
-export function closeDB(): void {
-  if (client) {
-    client.close()
-    client = null
-  }
-}
-
-/**
- * Channel data for saving
- */
+// Data record types (interfaces remain the same)
 export interface ChannelRecord {
   id: string
   name: string
@@ -273,41 +136,31 @@ export interface ChannelRecord {
   type?: string
 }
 
-/**
- * Save or update a channel in the database
- */
-export async function saveChannel(channel: ChannelRecord): Promise<void> {
-  const statement = {
-    sql: `
-      INSERT INTO channels (id, name, guild_id, guild_name, parent_id, topic, type, first_seen)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        guild_id = COALESCE(excluded.guild_id, guild_id),
-        guild_name = COALESCE(excluded.guild_name, guild_name),
-        parent_id = COALESCE(excluded.parent_id, parent_id),
-        topic = COALESCE(excluded.topic, topic),
-        type = COALESCE(excluded.type, type)
-    `,
-    args: [
-      channel.id,
-      channel.name,
-      channel.guildId || null,
-      channel.guildName || null,
-      channel.parentId || null,
-      channel.topic || null,
-      channel.type || null,
-      new Date().toISOString(),
-    ],
-  }
-
-  await executeStatement(statement)
+export interface MessageRecord {
+  id: string
+  channelId: string
+  authorId: string
+  authorName: string
+  content: string
+  timestamp: string
+  editedTimestamp?: string
+  isBot: boolean
+  messageType?: string
+  pinned?: boolean
+  attachments?: any[]
+  embeds?: any[]
+  stickers?: any[]
+  reactions?: any[]
+  replyToId?: string
+  threadId?: string
 }
 
 /**
- * Save multiple channels in a batch
+ * Save multiple channels in a batch to a specific database.
+ * @param db The libSQL client to use.
+ * @param channels The channel records to save.
  */
-export async function saveChannels(channels: ChannelRecord[]): Promise<void> {
+export async function saveChannels(db: Client, channels: ChannelRecord[]): Promise<void> {
   if (channels.length === 0) return
 
   const statements = channels.map((channel) => ({
@@ -334,124 +187,15 @@ export async function saveChannels(channels: ChannelRecord[]): Promise<void> {
     ],
   }))
 
-  if (useDualWrite) {
-    await executeBatchDualWrite(statements)
-  } else {
-    const db = getClient()
-    await db.batch(statements, 'write')
-  }
+  await db.batch(statements, 'write')
 }
 
 /**
- * Message data for saving
+ * Save multiple messages in a batch to a specific database.
+ * @param db The libSQL client to use.
+ * @param messages The message records to save.
  */
-export interface MessageRecord {
-  id: string
-  channelId: string
-  authorId: string
-  authorName: string
-  content: string
-  timestamp: string
-  editedTimestamp?: string
-  isBot: boolean
-  messageType?: string
-  pinned?: boolean
-  attachments?: Array<{ id: string; name: string; url: string; size: number; contentType?: string }>
-  embeds?: Array<{
-    type?: string
-    title?: string
-    description?: string
-    url?: string
-    color?: number
-    timestamp?: string
-    footer?: { text: string }
-    image?: { url: string }
-    thumbnail?: { url: string }
-    author?: { name: string; url?: string }
-    fields?: Array<{ name: string; value: string; inline?: boolean }>
-  }>
-  stickers?: Array<{ id: string; name: string; formatType: number }>
-  reactions?: Array<{ emoji: string; count: number; name: string; users: string[] }>
-  replyToId?: string
-  threadId?: string
-}
-
-/**
- * Log a channel event for efficient refill queries
- * Events are only logged in dual-write mode (live archiving)
- */
-async function logChannelEvent(channelId: string, eventType: 'message' | 'update' | 'delete', timestamp: string): Promise<void> {
-  // Only log events during live archiving (dual-write mode), not during backfill
-  if (!useDualWrite) return
-
-  const statement = {
-    sql: `INSERT INTO channel_events (channel_id, event_type, timestamp) VALUES (?, ?, ?)`,
-    args: [channelId, eventType, timestamp]
-  }
-
-  try {
-    // Log to both Turso and local cache
-    if (client) {
-      await client.execute(statement).catch(() => {}) // Ignore errors
-    }
-    if (cacheClient) {
-      await cacheClient.execute(statement).catch(() => {}) // Ignore errors
-    }
-  } catch {
-    // Event logging is best-effort, don't fail on errors
-  }
-}
-
-/**
- * Save or update a message in the database
- */
-export async function saveMessage(msg: MessageRecord): Promise<void> {
-  const statement = {
-    sql: `
-      INSERT INTO messages (id, channel_id, author_id, author_name, content, timestamp, edited_timestamp, is_bot, message_type, pinned, attachments, embeds, stickers, reactions, reply_to_id, thread_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        content = excluded.content,
-        edited_timestamp = excluded.edited_timestamp,
-        pinned = excluded.pinned,
-        embeds = excluded.embeds,
-        reactions = excluded.reactions
-    `,
-    args: [
-      msg.id,
-      msg.channelId,
-      msg.authorId,
-      msg.authorName,
-      msg.content,
-      msg.timestamp,
-      msg.editedTimestamp || null,
-      msg.isBot ? 1 : 0,
-      msg.messageType || null,
-      msg.pinned ? 1 : 0,
-      msg.attachments ? JSON.stringify(msg.attachments) : null,
-      msg.embeds ? JSON.stringify(msg.embeds) : null,
-      msg.stickers ? JSON.stringify(msg.stickers) : null,
-      msg.reactions ? JSON.stringify(msg.reactions) : null,
-      msg.replyToId || null,
-      msg.threadId || null,
-    ],
-  }
-
-  if (useDualWrite) {
-    await executeDualWrite(statement)
-  } else {
-    const db = getClient()
-    await db.execute(statement)
-  }
-
-  // Log channel event for efficient refill queries
-  await logChannelEvent(msg.channelId, 'message', msg.timestamp)
-}
-
-/**
- * Save multiple messages in a batch
- */
-export async function saveMessages(messages: MessageRecord[]): Promise<void> {
+export async function saveMessages(db: Client, messages: MessageRecord[]): Promise<void> {
   if (messages.length === 0) return
 
   const statements = messages.map((msg) => ({
@@ -484,20 +228,17 @@ export async function saveMessages(messages: MessageRecord[]): Promise<void> {
       msg.threadId || null,
     ],
   }))
-
-  if (useDualWrite) {
-    await executeBatchDualWrite(statements)
-  } else {
-    const db = getClient()
-    await db.batch(statements, 'write')
-  }
+  
+  await db.batch(statements, 'write')
 }
 
 /**
- * Get the oldest message ID for a channel (for backfill pagination)
+ * Gets the oldest message ID for a channel from a specific database.
+ * @param db The libSQL client to use.
+ * @param channelId The ID of the channel.
+ * @returns The oldest message ID, or null if not found.
  */
-export async function getOldestMessageId(channelId: string): Promise<string | null> {
-  const db = getClient()
+export async function getOldestMessageId(db: Client, channelId: string): Promise<string | null> {
   const result = await db.execute({
     sql: `SELECT id FROM messages WHERE channel_id = ? ORDER BY timestamp ASC LIMIT 1`,
     args: [channelId],
@@ -506,84 +247,11 @@ export async function getOldestMessageId(channelId: string): Promise<string | nu
 }
 
 /**
- * Get the newest message ID for a channel (for catch-up on restart)
+ * Gets channel statistics from a specific database.
+ * @param db The libSQL client to use.
+ * @returns An array of channel statistics.
  */
-export async function getNewestMessageId(channelId: string): Promise<string | null> {
-  const db = getClient()
-  const result = await db.execute({
-    sql: `SELECT id FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT 1`,
-    args: [channelId],
-  })
-  return (result.rows[0]?.id as string) || null
-}
-
-/**
- * Get channels that have messages (for catch-up on restart)
- */
-export async function getChannelsWithMessages(): Promise<string[]> {
-  const db = getClient()
-  const result = await db.execute(`SELECT DISTINCT channel_id FROM messages`)
-  return result.rows.map((r) => r.channel_id as string)
-}
-
-/**
- * Get channels that have messages after a certain timestamp
- * Used for efficient catch-up after archive downtime
- */
-export async function getChannelsWithMessagesAfter(timestamp: string): Promise<string[]> {
-  const db = getClient()
-  const result = await db.execute({
-    sql: `SELECT DISTINCT channel_id FROM messages WHERE timestamp > ? ORDER BY timestamp DESC`,
-    args: [timestamp]
-  })
-  return result.rows.map((r) => r.channel_id as string)
-}
-
-/**
- * Update the oldest fetched message ID for a channel
- */
-export async function updateChannelOldestFetched(channelId: string, messageId: string | null): Promise<void> {
-  await executeStatement({
-    sql: `UPDATE channels SET oldest_fetched_id = ? WHERE id = ?`,
-    args: [messageId, channelId],
-  })
-}
-
-/**
- * Get channel backfill status
- */
-export async function getChannelBackfillStatus(
-  channelId: string
-): Promise<{ oldestFetchedId: string | null } | null> {
-  const db = getClient()
-  const result = await db.execute({
-    sql: `SELECT oldest_fetched_id FROM channels WHERE id = ?`,
-    args: [channelId],
-  })
-  if (!result.rows[0]) return null
-  return { oldestFetchedId: result.rows[0].oldest_fetched_id as string | null }
-}
-
-/**
- * Statistics per channel
- */
-export interface ChannelStats {
-  id: string
-  name: string
-  guildName: string | null
-  messageCount: number
-  oldestMessageDate: string | null
-  newestMessageDate: string | null
-  backfillComplete: boolean
-  type: string | null
-  parentId: string | null
-}
-
-/**
- * Get message statistics per channel
- */
-export async function getChannelStats(): Promise<ChannelStats[]> {
-  const db = getClient()
+export async function getChannelStats(db: Client): Promise<any[]> {
   const result = await db.execute(`
     SELECT
       c.id,
@@ -600,445 +268,86 @@ export async function getChannelStats(): Promise<ChannelStats[]> {
     GROUP BY c.id
     ORDER BY messageCount DESC
   `)
-
-  return result.rows.map((row) => ({
-    id: row.id as string,
-    name: row.name as string,
-    guildName: row.guildName as string | null,
-    messageCount: Number(row.messageCount),
-    oldestMessageDate: row.oldestMessageDate as string | null,
-    newestMessageDate: row.newestMessageDate as string | null,
-    backfillComplete: row.oldest_fetched_id === 'COMPLETE',
-    type: row.type as string | null,
-    parentId: row.parentId as string | null,
-  }))
+  return result.rows
 }
 
 /**
- * Overall statistics
+ * Check if a message exists in the database.
+ * @param db The libSQL client to use.
+ * @param messageId The ID of the message to check.
+ * @returns True if the message exists, false otherwise.
  */
-export interface TotalStats {
-  totalMessages: number
-  totalChannels: number
-  oldestMessageDate: string | null
-  newestMessageDate: string | null
-  channelsComplete: number
-  channelsInProgress: number
+export async function messageExists(db: Client, messageId: string): Promise<boolean> {
+    const result = await db.execute({
+        sql: `SELECT 1 FROM messages WHERE id = ? LIMIT 1`,
+        args: [messageId],
+    });
+    return result.rows.length > 0;
 }
 
 /**
- * Get overall statistics
+ * Update the oldest fetched message ID for a channel.
+ * @param db The libSQL client to use.
+ * @param channelId The ID of the channel.
+ * @param messageId The ID of the oldest message fetched, or 'COMPLETE'.
  */
-export async function getTotalStats(): Promise<TotalStats> {
-  const db = getClient()
+export async function updateChannelOldestFetched(db: Client, channelId: string, messageId: string | null): Promise<void> {
+    await db.execute({
+        sql: `UPDATE channels SET oldest_fetched_id = ? WHERE id = ?`,
+        args: [messageId, channelId],
+    });
+}
 
-  const msgResult = await db.execute(`
-    SELECT
-      COUNT(*) as totalMessages,
-      MIN(timestamp) as oldestMessageDate,
-      MAX(timestamp) as newestMessageDate
-    FROM messages
-  `)
+/**
+ * Get channel frontfill status.
+ * @param db The libSQL client to use.
+ * @param channelId The ID of the channel.
+ * @returns The frontfill status, or null if channel not found.
+ */
+export async function getChannelBackfillStatus(db: Client, channelId: string): Promise<{ oldestFetchedId: string | null } | null> {
+    const result = await db.execute({
+        sql: `SELECT oldest_fetched_id FROM channels WHERE id = ?`,
+        args: [channelId],
+    });
+    if (!result.rows[0]) return null;
+    return { oldestFetchedId: result.rows[0].oldest_fetched_id as string | null };
+}
 
-  const channelResult = await db.execute(`
-    SELECT
-      COUNT(*) as totalChannels,
-      SUM(CASE WHEN oldest_fetched_id = 'COMPLETE' THEN 1 ELSE 0 END) as channelsComplete
+export async function getChannels(db: Client): Promise<ChannelRecord[]> {
+  const result = await db.execute(`
+    SELECT id, name, guild_id as guildId, guild_name as guildName, parent_id as parentId, topic, type
     FROM channels
   `)
-
-  const msgStats = msgResult.rows[0]
-  const channelStats = channelResult.rows[0]
-
-  return {
-    totalMessages: Number(msgStats.totalMessages),
-    totalChannels: Number(channelStats.totalChannels),
-    oldestMessageDate: msgStats.oldestMessageDate as string | null,
-    newestMessageDate: msgStats.newestMessageDate as string | null,
-    channelsComplete: Number(channelStats.channelsComplete) || 0,
-    channelsInProgress: Number(channelStats.totalChannels) - (Number(channelStats.channelsComplete) || 0),
-  }
+  return result.rows as ChannelRecord[]
 }
 
-/**
- * Check if a message exists in the database
- */
-export async function messageExists(messageId: string): Promise<boolean> {
-  const db = getClient()
+export async function getMessages(db: Client, channelId: string, limit: number): Promise<MessageRecord[]> {
   const result = await db.execute({
-    sql: `SELECT 1 FROM messages WHERE id = ? LIMIT 1`,
-    args: [messageId],
-  })
-  return result.rows.length > 0
-}
-
-/**
- * Check if a channel exists in the database
- */
-export async function channelExists(channelId: string): Promise<boolean> {
-  const db = getClient()
-  const result = await db.execute({
-    sql: `SELECT 1 FROM channels WHERE id = ? LIMIT 1`,
-    args: [channelId],
-  })
-  return result.rows.length > 0
-}
-
-/**
- * Ensure a channel exists in the database (creates a minimal record if missing)
- * Used before saving real-time messages to satisfy foreign key constraint
- */
-export async function ensureChannelExists(channelId: string, channelName?: string): Promise<void> {
-  await executeStatement({
-    sql: `
-      INSERT INTO channels (id, name, first_seen)
-      VALUES (?, ?, ?)
-      ON CONFLICT(id) DO NOTHING
-    `,
-    args: [channelId, channelName || `channel-${channelId}`, new Date().toISOString()],
-  })
-}
-
-/**
- * Get database URL (for display purposes)
- */
-export function getDBPath(): string {
-  return process.env.TURSO_DB_URL || '(not configured)'
-}
-
-/**
- * Get recent messages for a channel from the archive
- */
-export async function getMessagesFromArchive(channelId: string, limit = 20): Promise<MessageRecord[]> {
-  const db = getClient()
-  const result = await db.execute({
-    sql: `
-      SELECT
-        id,
-        channel_id as channelId,
-        author_id as authorId,
-        author_name as authorName,
-        content,
-        timestamp,
-        is_bot as isBot,
-        attachments,
-        reactions,
-        reply_to_id as replyToId
-      FROM messages
-      WHERE channel_id = ?
-      ORDER BY timestamp DESC
-      LIMIT ?
-    `,
+    sql: `SELECT * FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?`,
     args: [channelId, limit],
   })
-
-  return result.rows.map((row) => ({
-    id: row.id as string,
-    channelId: row.channelId as string,
-    authorId: row.authorId as string,
-    authorName: row.authorName as string,
-    content: row.content as string,
-    timestamp: row.timestamp as string,
-    isBot: row.isBot === 1,
-    attachments: row.attachments ? JSON.parse(row.attachments as string) : undefined,
-    reactions: row.reactions ? JSON.parse(row.reactions as string) : undefined,
-    replyToId: (row.replyToId as string) || undefined,
-  }))
+  return result.rows as MessageRecord[]
 }
 
-/**
- * Get messages after a specific timestamp (for detecting new messages)
- */
-export async function getMessagesSinceTimestamp(
-  channelId: string,
-  sinceTimestamp: string,
-  excludeAuthorId?: string
-): Promise<MessageRecord[]> {
-  const db = getClient()
-  let sql = `
-    SELECT
-      id,
-      channel_id as channelId,
-      author_id as authorId,
-      author_name as authorName,
-      content,
-      timestamp,
-      is_bot as isBot,
-      attachments,
-      reactions,
-      reply_to_id as replyToId
-    FROM messages
-    WHERE channel_id = ? AND timestamp > ?
-  `
-  const args: (string | number)[] = [channelId, sinceTimestamp]
+export async function getMessagesSince(db: Client, channelId: string, timestamp: string, excludeAuthorId?: string): Promise<MessageRecord[]> {
+    let sql = `SELECT * FROM messages WHERE channel_id = ? AND timestamp > ?`
+    const args: (string | number)[] = [channelId, timestamp]
 
-  if (excludeAuthorId) {
-    sql += ` AND author_id != ?`
-    args.push(excludeAuthorId)
-  }
+    if (excludeAuthorId) {
+        sql += ` AND author_id != ?`
+        args.push(excludeAuthorId)
+    }
 
-  sql += ` ORDER BY timestamp DESC`
+    sql += ` ORDER BY timestamp DESC`
 
-  const result = await db.execute({ sql, args })
-
-  return result.rows.map((row) => ({
-    id: row.id as string,
-    channelId: row.channelId as string,
-    authorId: row.authorId as string,
-    authorName: row.authorName as string,
-    content: row.content as string,
-    timestamp: row.timestamp as string,
-    isBot: row.isBot === 1,
-    attachments: row.attachments ? JSON.parse(row.attachments as string) : undefined,
-    reactions: row.reactions ? JSON.parse(row.reactions as string) : undefined,
-    replyToId: (row.replyToId as string) || undefined,
-  }))
+    const result = await db.execute({ sql, args })
+    return result.rows as MessageRecord[]
 }
 
-/**
- * Get the newest message timestamp for a channel
- */
-export async function getNewestMessageTimestamp(channelId: string): Promise<string | null> {
-  const db = getClient()
+export async function getNewestMessageTimestamp(db: Client, channelId: string): Promise<string | null> {
   const result = await db.execute({
     sql: `SELECT timestamp FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT 1`,
     args: [channelId],
   })
   return (result.rows[0]?.timestamp as string) || null
-}
-
-/**
- * Get all archived channels
- */
-export async function getArchivedChannels(): Promise<ChannelRecord[]> {
-  const db = getClient()
-  const result = await db.execute(`
-    SELECT id, name, guild_id as guildId, guild_name as guildName, parent_id as parentId, topic, type
-    FROM channels
-  `)
-  return result.rows.map((row) => ({
-    id: row.id as string,
-    name: row.name as string,
-    guildId: row.guildId as string | undefined,
-    guildName: row.guildName as string | undefined,
-    parentId: row.parentId as string | undefined,
-    topic: row.topic as string | undefined,
-    type: row.type as string | undefined,
-  }))
-}
-
-/**
- * Check if archive database exists and has data
- */
-export async function hasArchiveData(): Promise<boolean> {
-  try {
-    const db = getClient()
-    const result = await db.execute(`SELECT COUNT(*) as count FROM messages`)
-    return Number(result.rows[0].count) > 0
-  } catch {
-    return false
-  }
-}
-
-/**
- * Get Discord URL for a channel
- */
-export async function getChannelUrl(channelId: string): Promise<string | null> {
-  const db = getClient()
-  const result = await db.execute({
-    sql: `SELECT id, guild_id, type FROM channels WHERE id = ?`,
-    args: [channelId],
-  })
-  const row = result.rows[0]
-  if (!row) return null
-
-  if (row.type === 'dm') {
-    return `https://discord.com/channels/@me/${row.id}`
-  }
-
-  if (row.guild_id) {
-    return `https://discord.com/channels/${row.guild_id}/${row.id}`
-  }
-
-  return null
-}
-
-/**
- * Get Discord URL for a message
- */
-export async function getMessageUrl(messageId: string): Promise<string | null> {
-  const db = getClient()
-  const result = await db.execute({
-    sql: `
-      SELECT m.id, m.channel_id, c.guild_id, c.type
-      FROM messages m
-      JOIN channels c ON m.channel_id = c.id
-      WHERE m.id = ?
-    `,
-    args: [messageId],
-  })
-  const row = result.rows[0]
-  if (!row) return null
-
-  if (row.type === 'dm') {
-    return `https://discord.com/channels/@me/${row.channel_id}/${row.id}`
-  }
-
-  if (row.guild_id) {
-    return `https://discord.com/channels/${row.guild_id}/${row.channel_id}/${row.id}`
-  }
-
-  return null
-}
-
-/**
- * Delete a message from the database
- */
-export async function deleteMessage(messageId: string): Promise<boolean> {
-  const statement = {
-    sql: `DELETE FROM messages WHERE id = ?`,
-    args: [messageId],
-  }
-
-  if (useDualWrite) {
-    // Delete from both Turso and local cache
-    let deletedFromEither = false
-    const errors: string[] = []
-
-    if (client) {
-      try {
-        const result = await client.execute(statement)
-        if (result.rowsAffected > 0) deletedFromEither = true
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : 'Unknown error'
-        errors.push(`Turso delete failed: ${msg}`)
-        console.error(`⚠️  Turso delete failed: ${msg}`)
-      }
-    }
-
-    if (cacheClient) {
-      try {
-        const result = await cacheClient.execute(statement)
-        if (result.rowsAffected > 0) deletedFromEither = true
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : 'Unknown error'
-        errors.push(`Local cache delete failed: ${msg}`)
-        console.error(`⚠️  Local cache delete failed: ${msg}`)
-      }
-    }
-
-    if (errors.length === 2) {
-      throw new Error(`Dual delete failed: ${errors.join('; ')}`)
-    }
-
-    return deletedFromEither
-  } else {
-    const db = getClient()
-    const result = await db.execute(statement)
-    return result.rowsAffected > 0
-  }
-}
-
-/**
- * Delete messages in a time range for a channel
- * Returns the number of messages deleted
- * In dual-write mode, deletes from both Turso and local cache
- */
-export async function deleteMessagesInTimeRange(
-  channelId: string,
-  startTime: string,
-  endTime: string
-): Promise<number> {
-  const statement = {
-    sql: `DELETE FROM messages WHERE channel_id = ? AND timestamp >= ? AND timestamp <= ?`,
-    args: [channelId, startTime, endTime],
-  }
-
-  let totalDeleted = 0
-
-  if (useDualWrite) {
-    // Delete from both Turso and local cache
-    if (client) {
-      try {
-        const result = await client.execute(statement)
-        totalDeleted = result.rowsAffected
-      } catch (error) {
-        console.error('Error deleting from Turso:', error)
-      }
-    }
-
-    if (cacheClient) {
-      try {
-        const result = await cacheClient.execute(statement)
-        // Use local cache count if Turso failed
-        if (totalDeleted === 0) totalDeleted = result.rowsAffected
-      } catch (error) {
-        console.error('Error deleting from local cache:', error)
-      }
-    }
-  } else {
-    // Single-write mode - only delete from Turso
-    const db = getClient()
-    const result = await db.execute(statement)
-    totalDeleted = result.rowsAffected
-  }
-
-  return totalDeleted
-}
-
-/**
- * Get message IDs in a time range for a channel (for refill boundary detection)
- */
-export async function getMessageIdsInTimeRange(
-  channelId: string,
-  startTime: string,
-  endTime: string
-): Promise<{ oldest: string | null; newest: string | null; count: number }> {
-  const db = getClient()
-  const result = await db.execute({
-    sql: `
-      SELECT 
-        MIN(id) as oldest,
-        MAX(id) as newest,
-        COUNT(*) as count
-      FROM messages 
-      WHERE channel_id = ? AND timestamp >= ? AND timestamp <= ?
-    `,
-    args: [channelId, startTime, endTime],
-  })
-  const row = result.rows[0]
-  return {
-    oldest: (row?.oldest as string) || null,
-    newest: (row?.newest as string) || null,
-    count: Number(row?.count) || 0,
-  }
-}
-
-/**
- * Get channels that had activity in a time range (via event log)
- * Falls back to scanning all messages if event log is empty
- */
-export async function getChannelsWithActivityInTimeRange(
-  startTime: string,
-  endTime: string
-): Promise<string[]> {
-  const db = getClient()
-
-  // First try using the event log (much faster)
-  const eventResult = await db.execute({
-    sql: `SELECT DISTINCT channel_id FROM channel_events WHERE timestamp >= ? AND timestamp <= ?`,
-    args: [startTime, endTime],
-  })
-
-  if (eventResult.rows.length > 0) {
-    return eventResult.rows.map(row => row.channel_id as string)
-  }
-
-  // Fallback: scan messages table (slower, but works if event log is empty)
-  const messageResult = await db.execute({
-    sql: `SELECT DISTINCT channel_id FROM messages WHERE timestamp >= ? AND timestamp <= ?`,
-    args: [startTime, endTime],
-  })
-
-  return messageResult.rows.map(row => row.channel_id as string)
 }

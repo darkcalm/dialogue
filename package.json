@@ -12,12 +12,12 @@
     "lint": "npm run pretty && eslint --max-warnings 0 --ext ts,tsx,json src",
     "check-token": "npm run build-ts && node dist/scripts/checkToken.js",
     "build:cli-esm": "node scripts/build-cli-esm.mjs",
-    "known": "npm run build:cli-esm && node dist-esm/known.mjs",
     "inbox": "npm run build:cli-esm && node dist-esm/inbox.mjs",
     "archive": "npm run build:cli-esm && node dist-esm/archive.mjs",
     "realtime": "npx tsx src/cli/realtime.ts",
     "archive:whatsapp": "npm run build:cli-esm && node dist-esm/whatsapp-archive.mjs",
-    "links": "npm run build:cli-esm && node dist-esm/links.mjs"
+    "links": "npm run build:cli-esm && node dist-esm/links.mjs",
+    "services:run": "scripts/run-services.sh"
   },
   "keywords": [
     "discord-bot",

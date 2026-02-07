@@ -1,27 +1,28 @@
 /**
  * Background service for real-time Discord message events.
  * This service ONLY listens for new messages, edits, and deletions.
- * It does not perform any historical backfill.
+ * It dual-writes to a local SQLite DB and a remote Turso DB for resilience.
  */
 
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
 import { DiscordPlatformClient } from '@/platforms/discord/client'
-import { IPlatformMessage } from '@/platforms/types'
+import { IPlatformMessage, IPlatformChannel } from '@/platforms/types'
+import { Client } from '@libsql/client'
 import {
   initDB,
-  closeDB,
-  saveChannel,
-  saveMessage,
-  deleteMessage,
-  channelExists,
-  ensureChannelExists,
+  closeAllDBs,
+  getClient,
+  saveChannels,
+  saveMessages,
+  // These will need to be re-implemented with dual-write logic
+  // deleteMessage,
+  // channelExists,
+  // ensureChannelExists,
   ChannelRecord,
   MessageRecord,
-  enableDualWriteMode,
 } from './db'
-import { initDBWithCache, hasLocalCache } from './local-cache'
 
 // Lock file to indicate realtime service is running
 const REALTIME_LOCK_FILE = path.join(os.homedir(), '.dialogue-realtime.lock')
@@ -29,7 +30,9 @@ const REALTIME_LOG_FILE = path.join(os.homedir(), '.dialogue-realtime.log')
 
 // State
 let isRunning = true
-let client: DiscordPlatformClient | null = null
+let discordClient: DiscordPlatformClient | null = null
+let localDb: Client | null = null
+let remoteDb: Client | null = null
 
 /**
  * Write lock file with current PID
@@ -76,11 +79,8 @@ function log(message: string): void {
   const logLine = `[${timestamp}] ${message}`
   console.log(logLine)
   try {
-    fs.appendFileSync(REALTIME_LOG_FILE, logLine + '
-')
-  } catch {
-    // Ignore file write errors
-  }
+    fs.appendFileSync(REALTIME_LOG_FILE, logLine + '\n')
+  } catch {}
 }
 
 /**
@@ -110,7 +110,7 @@ function messageToRecord(msg: IPlatformMessage): MessageRecord {
 /**
  * Convert platform channel to database channel record
  */
-function channelToRecord(ch: any): ChannelRecord {
+function channelToRecord(ch: IPlatformChannel): ChannelRecord {
   return {
     id: ch.id,
     name: ch.name,
@@ -122,6 +122,31 @@ function channelToRecord(ch: any): ChannelRecord {
   }
 }
 
+// Dual-write implementations
+async function dualWriteSaveMessages(records: MessageRecord[]) {
+  if (localDb) await saveMessages(localDb, records).catch(err => log(`⚠️ Local DB save failed: ${err.message}`))
+  if (remoteDb) await saveMessages(remoteDb, records).catch(err => log(`⚠️ Remote DB save failed: ${err.message}`))
+}
+
+async function dualWriteSaveChannels(records: ChannelRecord[]) {
+  if (localDb) await saveChannels(localDb, records).catch(err => log(`⚠️ Local DB channel save failed: ${err.message}`))
+  if (remoteDb) await saveChannels(remoteDb, records).catch(err => log(`⚠️ Remote DB channel save failed: ${err.message}`))
+}
+
+async function dualWriteDeleteMessage(messageId: string) {
+  const statement = { sql: `DELETE FROM messages WHERE id = ?`, args: [messageId] }
+  if (localDb) await localDb.execute(statement).catch(err => log(`⚠️ Local DB delete failed: ${err.message}`))
+  if (remoteDb) await remoteDb.execute(statement).catch(err => log(`⚠️ Remote DB delete failed: ${err.message}`))
+}
+
+async function channelExists(channelId: string): Promise<boolean> {
+  // Check local first, it's faster
+  const db = localDb || remoteDb
+  if (!db) return false
+  const result = await db.execute({ sql: `SELECT 1 FROM channels WHERE id = ? LIMIT 1`, args: [channelId] })
+  return result.rows.length > 0
+}
+
 /**
  * Handle real-time message events
  */
@@ -131,18 +156,14 @@ function setupRealtimeHandlers(client: DiscordPlatformClient): void {
       if (!(await channelExists(message.channelId))) {
         const channelInfo = await client.getChannel(message.channelId)
         if (channelInfo) {
-          await saveChannel(channelToRecord(channelInfo))
+          await dualWriteSaveChannels([channelToRecord(channelInfo)])
           log(`Discovered new channel #${channelInfo.name}`)
-        } else {
-          await ensureChannelExists(message.channelId)
         }
       }
-      const record = messageToRecord(message)
-      await saveMessage(record)
+      await dualWriteSaveMessages([messageToRecord(message)])
       log(`Saved message from ${message.author} in channel ${message.channelId}`)
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      log(`Failed to save message ${message.id}: ${errorMessage}`)
+      log(`Failed to save message ${message.id}: ${error instanceof Error ? error.message : 'Unknown'}`)
     }
   })
 
@@ -151,29 +172,22 @@ function setupRealtimeHandlers(client: DiscordPlatformClient): void {
       if (!(await channelExists(message.channelId))) {
         const channelInfo = await client.getChannel(message.channelId)
         if (channelInfo) {
-          await saveChannel(channelToRecord(channelInfo))
-        } else {
-          await ensureChannelExists(message.channelId)
+          await dualWriteSaveChannels([channelToRecord(channelInfo)])
         }
       }
-      const record = messageToRecord(message)
-      await saveMessage(record)
+      await dualWriteSaveMessages([messageToRecord(message)])
       log(`Updated message ${message.id}`)
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      log(`Failed to update message ${message.id}: ${errorMessage}`)
+      log(`Failed to update message ${message.id}: ${error instanceof Error ? error.message : 'Unknown'}`)
     }
   })
 
   client.onMessageDelete(async (channelId: string, messageId: string) => {
     try {
-      const deleted = await deleteMessage(messageId)
-      if (deleted) {
-        log(`Deleted message ${messageId} from channel ${channelId}`)
-      }
+      await dualWriteDeleteMessage(messageId)
+      log(`Deleted message ${messageId} from channel ${channelId}`)
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error)
-      log(`Failed to delete message ${messageId}: ${errorMessage}`)
+      log(`Failed to delete message ${messageId}: ${error instanceof Error ? error.message : 'Unknown'}`)
     }
   })
 }
@@ -186,12 +200,12 @@ function setupShutdownHandlers(): void {
     log('Shutting down...')
     isRunning = false
     removeLockFile()
-    closeDB()
-    log('Database closed.')
-    if (client) {
-      await client.disconnect()
+    if (discordClient) {
+      await discordClient.disconnect()
       log('Disconnected from Discord.')
     }
+    closeAllDBs()
+    log('Database connections closed.')
     process.exit(0)
   }
 
@@ -204,9 +218,7 @@ function setupShutdownHandlers(): void {
  * Main entry point
  */
 async function main(): Promise<void> {
-  console.log('
-Discord Real-time Event Service
-')
+  console.log('\nDiscord Real-time Event Service\n')
 
   if (isRealtimeRunning()) {
     console.log('Real-time service is already running.')
@@ -217,36 +229,29 @@ Discord Real-time Event Service
 
   try {
     fs.writeFileSync(REALTIME_LOG_FILE, '')
-  } catch {
-    // Ignore errors
-  }
+  } catch {}
 
-  log('Initializing database...')
-  await initDB()
-
-  log('Initializing local cache for dual-write...')
-  if (!hasLocalCache()) {
-    await initDBWithCache({ forceSync: true })
-  } else {
-    await initDBWithCache()
-  }
-  enableDualWriteMode()
-  log('Dual-write enabled.')
+  log('Initializing databases...')
+  localDb = getClient('realtime', 'local')
+  remoteDb = getClient('realtime', 'remote')
+  await initDB(localDb)
+  await initDB(remoteDb)
+  log('Databases initialized.')
 
   setupShutdownHandlers()
 
   log('Connecting to Discord...')
-  client = new DiscordPlatformClient()
+  discordClient = new DiscordPlatformClient()
 
   try {
-    await client.connect()
+    await discordClient.connect()
     log('Connected to Discord!')
 
     log('Setting up real-time message handlers...')
-    setupRealtimeHandlers(client)
+    setupRealtimeHandlers(discordClient)
     log('Real-time handlers active')
 
-    const user = client.getCurrentUser()
+    const user = discordClient.getCurrentUser()
     if (user) {
       log(`Logged in as ${user.username}`)
     }
@@ -256,9 +261,8 @@ Discord Real-time Event Service
 
     await new Promise(() => {})
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error)
-    console.error('Fatal error:', errorMessage)
-    closeDB()
+    console.error('Fatal error:', error instanceof Error ? error.message : 'Unknown error')
+    closeAllDBs()
     process.exit(1)
   }
 }
