@@ -21,6 +21,8 @@ import {
   messageExists,
   updateChannelOldestFetched,
   getChannelBackfillStatus,
+  rowToChannelRecord,
+  rowToMessageRecord,
   ChannelRecord,
   MessageRecord,
 } from './db'
@@ -186,15 +188,15 @@ async function syncToRemote(localDb: Client, remoteDb: Client) {
     log(`Syncing ${channels.length} channels and ${messages.length} messages...`)
     
     if (channels.length > 0) {
-        await saveChannels(remoteDb, channels as ChannelRecord[])
+        await saveChannels(remoteDb, channels.map(rowToChannelRecord))
     }
     if (messages.length > 0) {
-        // Chunk the message sync to avoid overwhelming the remote DB
         const chunkSize = 500
-        for (let i = 0; i < messages.length; i += chunkSize) {
-            const chunk = messages.slice(i, i + chunkSize)
-            await saveMessages(remoteDb, chunk as MessageRecord[])
-            log(`  Synced ${i + chunk.length} of ${messages.length} messages...`)
+        const allRecords = messages.map(rowToMessageRecord)
+        for (let i = 0; i < allRecords.length; i += chunkSize) {
+            const chunk = allRecords.slice(i, i + chunkSize)
+            await saveMessages(remoteDb, chunk)
+            log(`  Synced ${i + chunk.length} of ${allRecords.length} messages...`)
         }
     }
 

@@ -880,12 +880,6 @@ function UnifiedView({
   rows,
   getChannelFromDisplayIndex,
 }: UnifiedViewProps) {
-  const visibleCount = rows - 4
-
-  // Calculate scroll offset to keep selected item visible
-  const scrollOffset = Math.max(0, selectedFlatIndex - Math.floor(visibleCount / 2))
-
-  // Render items with loading/empty states for expanded channels
   const renderedItems: React.ReactNode[] = []
   let flatIdx = 0
 
@@ -894,148 +888,126 @@ function UnifiedView({
     const isHeader = displayItem.startsWith('══════')
 
     if (isHeader) {
-      // Find the corresponding flat item
       if (flatIdx < flatItems.length && flatItems[flatIdx].type === 'header') {
-        if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
-          const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
-          renderedItems.push(
-            <Text key={`h-${i}`} color={isSelected ? 'green' : 'yellow'} dimColor={!isSelected} inverse={isSelected}>
-              {isSelected ? '▶ ' : '  '}{displayItem}
-            </Text>
-          )
-        }
+        const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
+        renderedItems.push(
+          <Text key={`h-${i}`} color={isSelected ? 'green' : 'yellow'} dimColor={!isSelected} inverse={isSelected}>
+            {isSelected ? '▶ ' : '  '}{displayItem}
+          </Text>
+        )
         flatIdx++
       }
     } else {
       const channel = getChannelFromDisplayIndex(i, channels)
       if (!channel) continue
 
-      // Channel line
       if (flatIdx < flatItems.length && flatItems[flatIdx].type === 'channel') {
-        if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
-          const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
-          const isExpanded = expandedChannels.has(channel.id)
-          const isReaderFocus = readerFocusChannel === channel.id
-          const expandIcon = isExpanded ? '▼' : '▶'
-          const readerIndicator = isReaderFocus ? ' 📖' : ''
+        const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
+        const isExpanded = expandedChannels.has(channel.id)
+        const isReaderFocus = readerFocusChannel === channel.id
+        const expandIcon = isExpanded ? '▼' : '▶'
+        const readerIndicator = isReaderFocus ? ' 📖' : ''
 
-          renderedItems.push(
-            <Text
-              key={`c-${channel.id}`}
-              inverse={isSelected}
-              color={isSelected ? 'green' : isReaderFocus ? 'magenta' : isExpanded ? 'cyan' : 'blackBright'}
-            >
-              {isSelected ? '▶ ' : '  '}
-              {expandIcon} {displayItem}{readerIndicator}
-            </Text>
-          )
-        }
+        renderedItems.push(
+          <Text
+            key={`c-${channel.id}`}
+            inverse={isSelected}
+            color={isSelected ? 'green' : isReaderFocus ? 'magenta' : isExpanded ? 'cyan' : 'blackBright'}
+          >
+            {isSelected ? '▶ ' : '  '}
+            {expandIcon} {displayItem}{readerIndicator}
+          </Text>
+        )
         flatIdx++
       }
 
-      // If expanded, render messages and input
       if (expandedChannels.has(channel.id)) {
         const data = expandedChannelData.get(channel.id)
 
         if (data?.isLoading) {
-          // Show loading state (not in flatItems, inject directly)
-          if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
-            renderedItems.push(
-              <Text key={`load-${channel.id}`} color="gray">
-                {'    '}⏳ Loading messages...
-              </Text>
-            )
-          }
+          renderedItems.push(
+            <Text key={`load-${channel.id}`} color="gray">
+              {'    '}⏳ Loading messages...
+            </Text>
+          )
         } else if (data && data.messages.length === 0) {
-          // Show empty state
-          if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
-            renderedItems.push(
-              <Text key={`empty-${channel.id}`} color="gray">
-                {'    '}(no messages)
-              </Text>
-            )
-          }
+          renderedItems.push(
+            <Text key={`empty-${channel.id}`} color="gray">
+              {'    '}(no messages)
+            </Text>
+          )
         } else if (data) {
-          // Render messages based on flatItems (which respects the scroll offset)
           while (flatIdx < flatItems.length) {
             const currentItem = flatItems[flatIdx]
-            // Stop if not a message or belongs to different channel
             if (currentItem.type !== 'message') break
             if (currentItem.channelId !== channel.id) break
 
-            if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
-              const isNavSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
-              // In reader mode, check if this message is the selected one
-              const isReaderChannel = readerFocusChannel === channel.id
-              const readerOffset = channelMessageOffsets.get(channel.id) || 0
-              const isReaderSelected = isReaderChannel && currentItem.messageIndex === readerOffset + readerSelectedMessageOffset
-              const isSelected = isNavSelected || isReaderSelected
-              const msg = data.messages[currentItem.messageIndex]
-              if (msg) {
-                const attachmentIndicator = msg.hasAttachments
-                  ? ` 📎(${msg.attachmentCount})`
+            const isNavSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
+            const isReaderChannel = readerFocusChannel === channel.id
+            const readerOffset = channelMessageOffsets.get(channel.id) || 0
+            const isReaderSelected = isReaderChannel && currentItem.messageIndex === readerOffset + readerSelectedMessageOffset
+            const isSelected = isNavSelected || isReaderSelected
+            const msg = data.messages[currentItem.messageIndex]
+            if (msg) {
+              const attachmentIndicator = msg.hasAttachments
+                ? ` 📎(${msg.attachmentCount})`
+                : ''
+              const reactionsText =
+                Array.isArray(msg.reactions) && msg.reactions.length > 0
+                ? ' ' + msg.reactions.map((r) => `${r.emoji}${r.count}`).join(' ')
                   : ''
-                const reactionsText =
-                  Array.isArray(msg.reactions) && msg.reactions.length > 0
-                  ? ' ' + msg.reactions.map((r) => `${r.emoji}${r.count}`).join(' ')
-                    : ''
 
-                renderedItems.push(
-                  <Text
-                    key={`msg-${channel.id}-${msg.id}`}
-                    inverse={isSelected}
-                    color={isSelected ? (isReaderSelected ? 'magenta' : 'blue') : 'gray'}
-                  >
-                    {'    '}
-                    {isSelected ? '▶ ' : '  '}
-                    [{msg.timestamp}] {msg.author}
-                    {attachmentIndicator}: {msg.content.split('\n')[0].slice(0, 60)}
-                    {msg.content.split('\n')[0].length > 60 ? '...' : ''}
-                    {reactionsText}
-                  </Text>
-                )
-              }
+              renderedItems.push(
+                <Text
+                  key={`msg-${channel.id}-${msg.id}`}
+                  inverse={isSelected}
+                  color={isSelected ? (isReaderSelected ? 'magenta' : 'blue') : 'gray'}
+                >
+                  {'    '}
+                  {isSelected ? '▶ ' : '  '}
+                  [{msg.timestamp}] {msg.author}
+                  {attachmentIndicator}: {msg.content.split('\n')[0]}
+                  {reactionsText}
+                </Text>
+              )
             }
             flatIdx++
           }
         }
 
-        // Input line for this channel
         if (flatIdx < flatItems.length && flatItems[flatIdx].type === 'input') {
-          if (flatIdx - scrollOffset >= 0 && flatIdx - scrollOffset < visibleCount) {
-            const isSelected = flatIdx === selectedFlatIndex
-            const isComposing = isSelected && focusMode === 'compose'
-            const isInputSelected = isSelected && focusMode === 'navigation'
+          const isSelected = flatIdx === selectedFlatIndex
+          const isComposing = isSelected && focusMode === 'compose'
+          const isInputSelected = isSelected && focusMode === 'navigation'
 
-            renderedItems.push(
-              <Box key={`input-${channel.id}`} flexDirection="column">
-                {replyingToMessageId && isSelected && (
-                  <Text color="cyan">{'    '}↳ Replying...</Text>
-                )}
-                <Box>
-                  <Text color={isComposing ? 'green' : isInputSelected ? 'cyan' : 'gray'}>
-                    {'    '}
-                    {isComposing ? '✎ ' : isInputSelected ? '▶ ' : '  '}
+          renderedItems.push(
+            <Box key={`input-${channel.id}`} flexDirection="column">
+              {replyingToMessageId && isSelected && (
+                <Text color="cyan">{'    '}↳ Replying...</Text>
+              )}
+              <Box>
+                <Text color={isComposing ? 'green' : isInputSelected ? 'cyan' : 'gray'}>
+                  {'    '}
+                  {isComposing ? '✎ ' : isInputSelected ? '▶ ' : '  '}
+                </Text>
+                {isComposing ? (
+                  <SimpleTextInput
+                    value={inputText}
+                    cursorPos={inputCursorPos}
+                    onChange={onInputChange}
+                    onCursorChange={onCursorChange}
+                    onSubmit={onSubmitUnified}
+                    placeholder="Type message (Enter=send, Esc=cancel)..."
+                    focus={true}
+                  />
+                ) : (
+                  <Text color={isInputSelected ? 'cyan' : 'gray'} dimColor={!isInputSelected} inverse={isInputSelected}>
+                    [press i to compose]
                   </Text>
-                  {isComposing ? (
-                    <SimpleTextInput
-                      value={inputText}
-                      cursorPos={inputCursorPos}
-                      onChange={onInputChange}
-                      onCursorChange={onCursorChange}
-                      onSubmit={onSubmitUnified} // Changed here
-                      placeholder="Type message (Enter=send, Esc=cancel)..."
-                      focus={true}
-                    />
-                  ) : (
-                    <Text color={isInputSelected ? 'cyan' : 'gray'} dimColor={!isInputSelected} inverse={isInputSelected}>
-                      [press i to compose]
-                    </Text>
-                  )}
-                </Box>
+                )}
               </Box>
-            )
-          }
+            </Box>
+          )
           flatIdx++
         }
       }
@@ -1177,7 +1149,7 @@ export function App({
     attachedFiles: [],
     llmOriginalText: '',
     llmProcessedText: '',
-    statusText: `${title} - ↑↓ navigate · Enter/Tab expand · R refresh · i compose · Esc exit`,
+    statusText: `${title}`,
     loading: false,
     messageDetail: null,
     rows: stdout?.rows || 24,
@@ -1202,6 +1174,32 @@ export function App({
       stdout?.off('resize', handleResize)
     }
   }, [stdout])
+
+  // // Enable mouse wheel scrolling
+  // useEffect(() => {
+  //   const stdin = process.stdin
+  //   if (!stdin.setRawMode) return
+  //   process.stdout.write('\x1b[?1000h')
+  //   process.stdout.write('\x1b[?1006h')
+  //   const handleData = (data: Buffer) => {
+  //     const str = data.toString()
+  //     const sgrMatch = str.match(/\x1b\[<(\d+);\d+;\d+[Mm]/)
+  //     if (sgrMatch) {
+  //       const button = parseInt(sgrMatch[1], 10)
+  //       if (button === 64) {
+  //         dispatch({ type: 'SELECT_FLAT_INDEX', index: state.selectedFlatIndex - 3 })
+  //       } else if (button === 65) {
+  //         dispatch({ type: 'SELECT_FLAT_INDEX', index: state.selectedFlatIndex + 3 })
+  //       }
+  //     }
+  //   }
+  //   stdin.on('data', handleData)
+  //   return () => {
+  //     stdin.off('data', handleData)
+  //     process.stdout.write('\x1b[?1006l')
+  //     process.stdout.write('\x1b[?1000l')
+  //   }
+  // }, [state.selectedFlatIndex])
 
   // Rebuild flat items when channels, expanded state, or data changes
   useEffect(() => {
@@ -1282,7 +1280,7 @@ export function App({
       dispatch({ type: 'SET_LOADING', loading: false })
       dispatch({
         type: 'SET_STATUS',
-        text: `${title} - ↑↓ navigate · Enter/Tab expand · R refresh · i compose · Esc exit`,
+        text: `${title}`,
       })
     }
 
@@ -1874,7 +1872,7 @@ export function App({
     dispatch({ type: 'SET_LOADING', loading: false })
     dispatch({
       type: 'SET_STATUS',
-      text: `${title} - ↑↓ navigate · Enter/Tab expand · R refresh · i compose · Esc exit`,
+      text: `${title}`,
     })
   }, [state.expandedChannels, state.channels, loadMessagesForChannelInternal, onRefreshChannels, title])
   
@@ -1893,13 +1891,13 @@ export function App({
           if (state.view === 'llmReview') {
             dispatch({ type: 'SET_VIEW', view: 'unified' })
             dispatch({ type: 'CLEAR_LLM_TEXTS' })
-            dispatch({ type: 'SET_STATUS', text: `${title} - ↑↓ navigate · Enter/Tab expand · R refresh · i compose · Esc exit` })
+            dispatch({ type: 'SET_STATUS', text: `${title}` })
             return
           }
           if (state.focusMode === 'compose') {
             dispatch({ type: 'RESET_MESSAGE_STATE' })
             dispatch({ type: 'SET_FOCUS_MODE', mode: 'navigation' })
-            dispatch({ type: 'SET_STATUS', text: `${title} - ↑↓ navigate · Enter/Tab expand · R refresh · i compose · Esc exit` })
+            dispatch({ type: 'SET_STATUS', text: `${title}` })
             return
           }
           if (state.readerFocusChannel) {
@@ -1931,9 +1929,18 @@ export function App({
 
               // Enter key on channel or header
               if (key.return || key.tab) {
-                if (selectedFlatItem?.type === 'header') {
-                  const sectionName = selectedFlatItem.sectionName.split(' ')[2] as SectionName
-                  onToggleSection && onToggleSection(sectionName)
+                if (selectedFlatItem?.type === 'header' && onToggleSection) {
+                  const header = selectedFlatItem.sectionName
+                  let sectionName: SectionName | null = null
+                  if (header.includes('UNFOLLOWED NEW')) sectionName = 'unfollowed_new'
+                  else if (header.includes('UNFOLLOWED')) sectionName = 'unfollowed'
+                  else if (header.includes('NEW')) sectionName = 'new'
+                  else if (header.includes('FOLLOWING')) sectionName = 'following'
+                  if (sectionName) {
+                    void onToggleSection(sectionName).then(({ channels, displayItems }) => {
+                      dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+                    })
+                  }
                   return
                 }
                 if (selectedFlatItem?.type === 'channel') {
@@ -1987,10 +1994,14 @@ export function App({
               if (input === 'f') {
                 const selectedChannelId = getChannelIdFromFlatItem(selectedFlatItem!)
                 const channel = state.channels.find(c => c.id === selectedChannelId)
-                if (channel && channel.group === 'unfollowed') {
-                  onFollowChannel && onFollowChannel(channel)
-                } else if (channel && channel.group === 'following') {
-                  onUnfollowChannel && onUnfollowChannel(channel)
+                if (channel && (channel as any).group === 'unfollowed' && onFollowChannel) {
+                  void onFollowChannel(channel).then(({ channels, displayItems }) => {
+                    dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+                  })
+                } else if (channel && onUnfollowChannel) {
+                  void onUnfollowChannel(channel).then(({ channels, displayItems }) => {
+                    dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+                  })
                 }
                 return
               }
@@ -2075,6 +2086,38 @@ export function App({
                   const nextChannel = state.channels[currentChannelIdx + 1]
                   dispatch({ type: 'SET_READER_FOCUS', channelId: nextChannel.id })
                 }
+                return
+              }
+              const readerOffset = state.channelMessageOffsets.get(state.readerFocusChannel) || 0
+              const selectedMsg = channelData.messages[readerOffset + state.readerSelectedMessageOffset]
+
+              if (input === 'a' && selectedMsg) {
+                if (!selectedMsg.hasAttachments || selectedMsg.attachments.length === 0) {
+                  dispatch({ type: 'SET_STATUS', text: 'No attachments on this message' })
+                } else {
+                  dispatch({ type: 'SET_LOADING', loading: true })
+                  void downloadAttachmentsFromInfo(selectedMsg.attachments, (status) => {
+                    dispatch({ type: 'SET_STATUS', text: status })
+                  }).catch((err) => {
+                    dispatch({ type: 'SET_STATUS', text: `❌ Download failed: ${err instanceof Error ? err.message : 'Unknown error'}` })
+                  }).finally(() => {
+                    dispatch({ type: 'SET_LOADING', loading: false })
+                  })
+                }
+                return
+              }
+              if (input === 'o' && selectedMsg) {
+                const urls = extractUrls(selectedMsg.content)
+                if (urls.length > 0) openUrlInBrowser(urls[0])
+                return
+              }
+              if (input === 'v' && selectedMsg) {
+                dispatch({ type: 'SET_MESSAGE_DETAIL', detail: {
+                  author: selectedMsg.author,
+                  timestamp: selectedMsg.timestamp,
+                  content: selectedMsg.content,
+                  reactions: Array.isArray(selectedMsg.reactions) ? selectedMsg.reactions.map((r: any) => `${r.emoji}${r.count}`).join(' ') : ''
+                }})
                 return
               }
               if (input === 'q') {
@@ -2200,7 +2243,6 @@ export function App({
         )}
         {state.messageDetail && <MessageDetailView message={state.messageDetail} />}
       </Box>
-      <StatusBar text={state.statusText} loading={state.loading} />
       <HelpBar bindings={helpBindings} />
     </Box>
   )

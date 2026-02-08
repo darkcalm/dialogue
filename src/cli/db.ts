@@ -15,7 +15,7 @@ export type DbName = 'realtime' | 'archive'
 export type DbType = 'local' | 'remote'
 
 // Keep a cache of client instances
-const clients: Partial<Record<`${DbName}-${DbType}`, Client>> = {}
+const clients: Record<string, Client> = {}
 
 /**
  * Ensure the cache directory for local databases exists.
@@ -65,8 +65,8 @@ export function getClient(dbName: DbName, type: DbType): Client {
  */
 export function closeAllDBs(): void {
   for (const key in clients) {
-    clients[key as keyof typeof clients]?.close()
-    delete clients[key as keyof typeof clients]
+    clients[key]?.close()
+    delete clients[key]
   }
 }
 
@@ -146,7 +146,7 @@ function parseJson<T>(value: unknown): T | undefined {
   }
 }
 
-function rowToChannelRecord(row: any): ChannelRecord {
+export function rowToChannelRecord(row: any): ChannelRecord {
   return {
     id: String(row.id),
     name: String(row.name),

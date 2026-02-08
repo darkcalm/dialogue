@@ -3,8 +3,8 @@ import { SlashCommandBuilder } from '@discordjs/builders'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { initLinksDB, syncLinksFromCache, getLinks, getLinksStats, hasLinksDB, } from '@/cli/links-db'
-import { getClient, initDB } from '@/cli/db' // Import getClient and initDB
+import { initLinksDB, syncLinksFromCache, getLinks, getLinksStats, hasLinksDB, getLinksClient } from '@/cli/links-db'
+import { getClient, initDB } from '@/cli/db'
 
 const CACHE_DIR = path.join(os.homedir(), '.dialogue-cache')
 const REALTIME_DB_PATH = path.join(CACHE_DIR, 'realtime.db')
@@ -107,7 +107,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
           )
         }
 
-        const stats = await getLinksStats()
+        const stats = await getLinksStats(getLinksClient())
 
         const embed = new EmbedBuilder()
           .setTitle('🔗 Links Database Stats')
@@ -137,7 +137,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
         const count = interaction.options.getInteger('count') || 25
         const channelFilter = interaction.options.getString('channel')
-        const links = await getLinks({ limit: count, channelPattern: channelFilter || undefined })
+        const links = await getLinks(getLinksClient(), { limit: count, channelPattern: channelFilter || undefined })
 
         if (links.length === 0) {
           return interaction.editReply(channelFilter 
@@ -181,10 +181,10 @@ export async function execute(interaction: ChatInputCommandInteraction) {
           )
         }
 
-        const links = await getLinks({
+        const links = await getLinks(getLinksClient(), {
           urlPattern: urlPattern || undefined,
           channelPattern: channelFilter || undefined,
-          limit: 10000 // Get all results
+          limit: 10000
         })
 
         if (links.length === 0) {
@@ -225,7 +225,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       }
 
       case 'sync': {
-        const { added, total } = await syncLinksFromCache()
+        const realtimeDb = getClient('realtime', 'local')
+        const archiveDb = getClient('archive', 'local')
+        const { added, total } = await syncLinksFromCache(realtimeDb, archiveDb)
 
         const embed = new EmbedBuilder()
           .setTitle('🔄 Links Sync Complete')

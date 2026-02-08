@@ -34,7 +34,7 @@ interface InboxChannelInfo extends ChannelInfo {
   lastMessageTimestamp?: Date
 }
 
-export type SectionName = 'new' | 'following' | 'unfollowed'
+export type SectionName = 'new' | 'following' | 'unfollowed_new' | 'unfollowed'
 
 // Helper to convert DB MessageRecord to UI MessageInfo
 const dbRecordToMessageInfo = (record: MessageRecord): MessageInfo => ({
@@ -75,6 +75,7 @@ async function buildInbox(
 
   const newMessageChannels: InboxChannelInfo[] = []
   const followingChannels: InboxChannelInfo[] = []
+  const unfollowedNewChannels: InboxChannelInfo[] = []
   const unfollowedChannels: InboxChannelInfo[] = []
 
   for (const channel of allChannels) {
@@ -87,11 +88,20 @@ async function buildInbox(
     }
     
     const visitKey = `discord:${channel.id}`
-    const channelVisit = visitData[visitKey] ?? visitData[channel.id] // Backwards compatibility
+    const channelVisit = visitData[visitKey] ?? visitData[channel.id]
 
     if (!channelVisit) {
-      channelInfo.group = 'unfollowed'
-      unfollowedChannels.push(channelInfo)
+      let realtimeLatest = await getMessages(realtimeDb, channel.id, 1)
+      let archiveLatest = realtimeLatest.length > 0 ? [] : await getMessages(archiveDb, channel.id, 1)
+      const latest = realtimeLatest.length > 0 ? realtimeLatest : archiveLatest
+      if (latest.length > 0) {
+        channelInfo.lastMessageTimestamp = new Date(latest[0].timestamp)
+        channelInfo.group = 'unfollowed_new' as any
+        unfollowedNewChannels.push(channelInfo)
+      } else {
+        channelInfo.group = 'unfollowed'
+        unfollowedChannels.push(channelInfo)
+      }
       continue
     }
 
@@ -122,6 +132,7 @@ async function buildInbox(
 
   newMessageChannels.sort(sortByTimestamp)
   followingChannels.sort(sortByTimestamp)
+  unfollowedNewChannels.sort(sortByTimestamp)
   unfollowedChannels.sort((a,b) => a.name.localeCompare(b.name))
 
   const displayItems: string[] = []
@@ -150,6 +161,19 @@ async function buildInbox(
     if (!isCollapsed('following')) {
       followingChannels.forEach((ch) => {
         displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}`)
+        displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
+        channelList.push(ch)
+        channelIndex++
+      })
+    }
+  }
+
+  if (unfollowedNewChannels.length > 0) {
+    displayItems.push(`══════ ${collapseIndicator('unfollowed_new')} 📬 UNFOLLOWED NEW (${unfollowedNewChannels.length}) ══════`)
+    if (!isCollapsed('unfollowed_new')) {
+      unfollowedNewChannels.forEach((ch) => {
+        const badge = ch.newMessageCount ? ` [${ch.newMessageCount}]` : ''
+        displayItems.push(`${ch.guildName ? `${ch.guildName} / ` : ''}${ch.name}${badge}`)
         displayIndexToChannelIndex.set(displayItems.length - 1, channelIndex)
         channelList.push(ch)
         channelIndex++
@@ -230,7 +254,7 @@ async function main() {
       process.exit(0)
     }
 
-    const collapsedSections = new Set<SectionName>()
+    const collapsedSections = new Set<SectionName>(['unfollowed_new', 'unfollowed'])
     
     const realtimeDb = getClient('realtime', 'local')
     const archiveDb = getClient('archive', 'local')

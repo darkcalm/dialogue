@@ -23,7 +23,7 @@ function ensureCacheDir(): void {
   }
 }
 
-function getLinksClient(): Client {
+export function getLinksClient(): Client {
   if (linksClient) return linksClient
   ensureCacheDir()
   linksClient = createClient({ url: `file:${LINKS_DB_PATH}` })

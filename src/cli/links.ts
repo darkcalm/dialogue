@@ -15,7 +15,8 @@ import {
   getLinksDBInfo,
   hasLinksDB,
   initLinksDB,
-  closeLinksDB, // Import closeLinksDB
+  closeLinksDB,
+  getLinksClient,
 } from './links-db'
 import { getClient, initDB } from './db' // Import getClient and initDB
 
