@@ -96,10 +96,18 @@ async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: C
     return 0
   })
 
-  const activeChannels = new Set(sortedChannels.map((ch) => ch.id))
+  // Pre-filter out already completed channels
+  const backfillStatuses = await Promise.all(
+    sortedChannels.map(ch => getChannelBackfillStatus(localDb, ch.id))
+  )
+  const incompleteChannels = sortedChannels.filter((ch, i) =>
+    backfillStatuses[i]?.oldestFetchedId !== 'COMPLETE'
+  )
+
+  const activeChannels = new Set(incompleteChannels.map((ch) => ch.id))
   const channelMap = new Map(channels.map((ch) => [ch.id, ch]))
 
-  log(`Starting prioritized frontfill for ${activeChannels.size} channels...`)
+  log(`Starting prioritized frontfill for ${activeChannels.size} channels (${sortedChannels.length - incompleteChannels.length} already complete)...`)
 
   let consecutiveNoProgress = 0
   const maxConsecutiveNoProgress = 3
@@ -145,10 +153,15 @@ async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: C
     )
     
     let batchMadeProgress = false
+    let channelsCompleted = 0
+
     for (const result of fetchResults) {
         if (result.status === 'fulfilled' && result.value) {
             const { channelId, messages, hasMore } = result.value
-            if (!hasMore) activeChannels.delete(channelId)
+            if (!hasMore) {
+              activeChannels.delete(channelId)
+              channelsCompleted++
+            }
             if (messages.length > 0) {
                 batchMadeProgress = true
                 await saveMessages(localDb, messages.map(messageToRecord))
@@ -157,7 +170,8 @@ async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: C
         }
     }
 
-    if (!batchMadeProgress) {
+    // Count both message saves AND channel completions as progress
+    if (!batchMadeProgress && channelsCompleted === 0) {
       consecutiveNoProgress++
       if (consecutiveNoProgress >= maxConsecutiveNoProgress) {
         log(`⚠️  No progress for ${maxConsecutiveNoProgress} iterations. Stopping frontfill.`)
@@ -165,6 +179,9 @@ async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: C
       }
     } else {
       consecutiveNoProgress = 0
+      if (channelsCompleted > 0 && !batchMadeProgress) {
+        log(`  ✓ ${channelsCompleted} channel(s) completed`)
+      }
     }
 
     if (activeChannels.size > 0) {
@@ -178,17 +195,26 @@ async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: C
 }
 
 async function syncToRemote(localDb: Client, remoteDb: Client) {
-    log('🚀 Starting batch sync from local archive to remote Turso archive...')
-    
+    log('🚀 Starting full replacement sync from local archive to remote Turso archive...')
+
+    // Clear remote database completely
+    log('Dropping existing remote tables...')
+    await remoteDb.execute('DROP TABLE IF EXISTS messages')
+    await remoteDb.execute('DROP TABLE IF EXISTS channel_events')
+    await remoteDb.execute('DROP TABLE IF EXISTS channels')
+
+    // Recreate schema
+    log('Recreating remote schema...')
     await initDB(remoteDb)
-    
+
     const channels = (await localDb.execute("SELECT * FROM channels")).rows
     const messages = (await localDb.execute("SELECT * FROM messages")).rows
 
-    log(`Syncing ${channels.length} channels and ${messages.length} messages...`)
-    
+    log(`Uploading ${channels.length} channels and ${messages.length} messages...`)
+
     if (channels.length > 0) {
         await saveChannels(remoteDb, channels.map(rowToChannelRecord))
+        log(`  ✓ Uploaded ${channels.length} channels`)
     }
     if (messages.length > 0) {
         const chunkSize = 500
@@ -196,11 +222,11 @@ async function syncToRemote(localDb: Client, remoteDb: Client) {
         for (let i = 0; i < allRecords.length; i += chunkSize) {
             const chunk = allRecords.slice(i, i + chunkSize)
             await saveMessages(remoteDb, chunk)
-            log(`  Synced ${i + chunk.length} of ${allRecords.length} messages...`)
+            log(`  Uploaded ${i + chunk.length} of ${allRecords.length} messages...`)
         }
     }
 
-    log('✅ Batch sync complete.')
+    log('✅ Full replacement sync complete.')
 }
 
 
@@ -214,7 +240,12 @@ async function main(): Promise<void> {
 
   localDb = getClient('archive', 'local')
   remoteDb = getClient('archive', 'remote')
-  
+
+  log('Clearing local archive database for fresh frontfill...')
+  await localDb.execute('DROP TABLE IF EXISTS messages')
+  await localDb.execute('DROP TABLE IF EXISTS channel_events')
+  await localDb.execute('DROP TABLE IF EXISTS channels')
+
   log('Initializing local archive database...')
   await initDB(localDb)
   
