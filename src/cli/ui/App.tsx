@@ -98,6 +98,9 @@ export interface AppState {
   // Terminal dimensions
   rows: number
   cols: number
+
+  // Viewport scrolling
+  viewportOffset: number // How many lines we've scrolled down
 }
 
 type Action =
@@ -143,6 +146,8 @@ type Action =
   | { type: 'SELECT_FLAT_INDEX'; index: number }
   | { type: 'SET_FLAT_ITEMS'; items: FlatItem[] }
   | { type: 'MARK_CHANNEL_READ'; channelId: string }
+  | { type: 'SCROLL_VIEWPORT'; delta: number }
+  | { type: 'SET_VIEWPORT_OFFSET'; offset: number }
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -350,26 +355,36 @@ function reducer(state: AppState, action: Action): AppState {
       // Also update the display item to remove the (N new) indicator
       const channelIndex = state.channels.findIndex(c => c.id === action.channelId)
       if (channelIndex === -1) return state
-      
+
       const channel = state.channels[channelIndex] as ChannelInfo & { group?: string; newMessageCount?: number }
       if (channel.group !== 'new') return state // Already read
-      
+
       const updatedChannel = { ...channel, group: 'following' as const, newMessageCount: undefined }
       const newChannels = [...state.channels]
       newChannels[channelIndex] = updatedChannel
-      
+
       // Update display item to remove "(N new)" suffix
       const newDisplayItems = [...state.channelDisplayItems]
-      const displayIdx = state.channelDisplayItems.findIndex(item => 
+      const displayIdx = state.channelDisplayItems.findIndex(item =>
         !item.startsWith('══════') && item.includes(channel.name)
       )
       if (displayIdx >= 0) {
         // Remove the "(N new)" part from the display string
         newDisplayItems[displayIdx] = newDisplayItems[displayIdx].replace(/\s*\(\d+\s*new\)\s*$/, '')
       }
-      
+
       return { ...state, channels: newChannels, channelDisplayItems: newDisplayItems }
     }
+    case 'SCROLL_VIEWPORT':
+      return {
+        ...state,
+        viewportOffset: Math.max(0, state.viewportOffset + action.delta),
+      }
+    case 'SET_VIEWPORT_OFFSET':
+      return {
+        ...state,
+        viewportOffset: Math.max(0, action.offset),
+      }
     default:
       return state
   }
@@ -857,6 +872,7 @@ interface UnifiedViewProps {
   onSubmitUnified: (text: string) => void // Renamed prop
   replyingToMessageId: string | null
   rows: number
+  viewportOffset: number
   getChannelFromDisplayIndex: (index: number, channels: ChannelInfo[]) => ChannelInfo | null
 }
 
@@ -878,9 +894,10 @@ function UnifiedView({
   onSubmitUnified, // Renamed prop
   replyingToMessageId,
   rows,
+  viewportOffset,
   getChannelFromDisplayIndex,
 }: UnifiedViewProps) {
-  const renderedItems: React.ReactNode[] = []
+  const allRenderedItems: React.ReactNode[] = []
   let flatIdx = 0
 
   for (let i = 0; i < displayItems.length; i++) {
@@ -890,7 +907,7 @@ function UnifiedView({
     if (isHeader) {
       if (flatIdx < flatItems.length && flatItems[flatIdx].type === 'header') {
         const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
-        renderedItems.push(
+        allRenderedItems.push(
           <Text key={`h-${i}`} color={isSelected ? 'green' : 'yellow'} dimColor={!isSelected} inverse={isSelected}>
             {isSelected ? '▶ ' : '  '}{displayItem}
           </Text>
@@ -908,7 +925,7 @@ function UnifiedView({
         const expandIcon = isExpanded ? '▼' : '▶'
         const readerIndicator = isReaderFocus ? ' 📖' : ''
 
-        renderedItems.push(
+        allRenderedItems.push(
           <Text
             key={`c-${channel.id}`}
             inverse={isSelected}
@@ -925,13 +942,13 @@ function UnifiedView({
         const data = expandedChannelData.get(channel.id)
 
         if (data?.isLoading) {
-          renderedItems.push(
+          allRenderedItems.push(
             <Text key={`load-${channel.id}`} color="gray">
               {'    '}⏳ Loading messages...
             </Text>
           )
         } else if (data && data.messages.length === 0) {
-          renderedItems.push(
+          allRenderedItems.push(
             <Text key={`empty-${channel.id}`} color="gray">
               {'    '}(no messages)
             </Text>
@@ -957,7 +974,7 @@ function UnifiedView({
                 ? ' ' + msg.reactions.map((r) => `${r.emoji}${r.count}`).join(' ')
                   : ''
 
-              renderedItems.push(
+              allRenderedItems.push(
                 <Text
                   key={`msg-${channel.id}-${msg.id}`}
                   inverse={isSelected}
@@ -980,7 +997,7 @@ function UnifiedView({
           const isComposing = isSelected && focusMode === 'compose'
           const isInputSelected = isSelected && focusMode === 'navigation'
 
-          renderedItems.push(
+          allRenderedItems.push(
             <Box key={`input-${channel.id}`} flexDirection="column">
               {replyingToMessageId && isSelected && (
                 <Text color="cyan">{'    '}↳ Replying...</Text>
@@ -1014,9 +1031,13 @@ function UnifiedView({
     }
   }
 
+  // Calculate visible window (rows - 3 accounts for title, status, and help bars)
+  const visibleHeight = Math.max(1, rows - 3)
+  const visibleItems = allRenderedItems.slice(viewportOffset, viewportOffset + visibleHeight)
+
   return (
     <Box flexDirection="column" flexGrow={1}>
-      {renderedItems}
+      {visibleItems}
     </Box>
   )
 }
@@ -1154,6 +1175,7 @@ export function App({
     messageDetail: null,
     rows: stdout?.rows || 24,
     cols: stdout?.columns || 80,
+    viewportOffset: 0,
   }
 
   const [state, dispatch] = useReducer(reducer, initialState)
@@ -1192,7 +1214,9 @@ export function App({
       const isRelease = sgrMatch[3] === 'm'
 
       if (button === 0 && isRelease) {
-        const flatIndex = y - 2
+        // y-2 gives us the line on screen (accounting for title bar)
+        // Add viewportOffset to get the actual flat item index
+        const flatIndex = (y - 2) + state.viewportOffset
         if (flatIndex >= 0 && flatIndex < state.flatItems.length) {
           dispatch({ type: 'SELECT_FLAT_INDEX', index: flatIndex })
         }
@@ -1205,7 +1229,7 @@ export function App({
       process.stdout.write('\x1b[?1006l')
       process.stdout.write('\x1b[?1000l')
     }
-  }, [state.flatItems.length])
+  }, [state.flatItems.length, state.viewportOffset])
 
   // Rebuild flat items when channels, expanded state, or data changes
   useEffect(() => {
@@ -1220,6 +1244,21 @@ export function App({
     )
     dispatch({ type: 'SET_FLAT_ITEMS', items: newFlatItems })
   }, [state.channelDisplayItems, state.channels, state.expandedChannels, state.expandedChannelData, getChannelFromDisplayIndex, state.readerFocusChannel, state.channelMessageOffsets])
+
+  // Auto-scroll viewport to keep selected item visible
+  useEffect(() => {
+    const visibleHeight = Math.max(1, state.rows - 3)
+    const selectedIndex = state.selectedFlatIndex
+
+    // If selected item is above viewport, scroll up to show it
+    if (selectedIndex < state.viewportOffset) {
+      dispatch({ type: 'SET_VIEWPORT_OFFSET', offset: selectedIndex })
+    }
+    // If selected item is below viewport, scroll down to show it
+    else if (selectedIndex >= state.viewportOffset + visibleHeight) {
+      dispatch({ type: 'SET_VIEWPORT_OFFSET', offset: selectedIndex - visibleHeight + 1 })
+    }
+  }, [state.selectedFlatIndex, state.viewportOffset, state.rows])
 
   // Load messages for channels with new messages on startup
   const loadMessagesForChannelInternal = useCallback(
@@ -1889,6 +1928,33 @@ export function App({
         if (state.loading) return // Ignore input when loading
 
         // Global hotkeys (always active)
+
+        // Viewport scrolling (works in all modes)
+        if (key.ctrl && input === 'u') {
+          // Scroll up half a page
+          const halfPage = Math.floor((state.rows - 3) / 2)
+          dispatch({ type: 'SCROLL_VIEWPORT', delta: -halfPage })
+          return
+        }
+        if (key.ctrl && input === 'd') {
+          // Scroll down half a page
+          const halfPage = Math.floor((state.rows - 3) / 2)
+          dispatch({ type: 'SCROLL_VIEWPORT', delta: halfPage })
+          return
+        }
+        if (key.pageUp) {
+          // Scroll up one page
+          const fullPage = state.rows - 3
+          dispatch({ type: 'SCROLL_VIEWPORT', delta: -fullPage })
+          return
+        }
+        if (key.pageDown) {
+          // Scroll down one page
+          const fullPage = state.rows - 3
+          dispatch({ type: 'SCROLL_VIEWPORT', delta: fullPage })
+          return
+        }
+
         if (key.escape) {
           if (state.messageDetail) {
             dispatch({ type: 'SET_MESSAGE_DETAIL', detail: null })
@@ -2172,6 +2238,7 @@ export function App({
 
   const commonHelpBindings = [
     { key: '↑↓', label: 'navigate' },
+    { key: 'Ctrl+U/D', label: 'scroll' },
     { key: 'Esc', label: 'back/exit' },
     { key: 'R', label: 'refresh' },
   ]
@@ -2236,6 +2303,7 @@ export function App({
             onSubmitUnified={sendMessage}
             replyingToMessageId={state.replyingToMessageId}
             rows={state.rows}
+            viewportOffset={state.viewportOffset}
             getChannelFromDisplayIndex={getChannelFromDisplayIndex}
           />
         )}
