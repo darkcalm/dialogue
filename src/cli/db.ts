@@ -125,7 +125,7 @@ export async function initDB(db: Client): Promise<void> {
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)`)
 }
 
-// Data record types (interfaces remain the same)
+// Data record types
 export interface ChannelRecord {
   id: string
   name: string
@@ -134,6 +134,49 @@ export interface ChannelRecord {
   parentId?: string
   topic?: string
   type?: string
+}
+
+function parseJson<T>(value: unknown): T | undefined {
+  if (!value) return undefined
+  if (typeof value !== 'string') return value as T
+  try {
+    return JSON.parse(value) as T
+  } catch {
+    return undefined
+  }
+}
+
+function rowToChannelRecord(row: any): ChannelRecord {
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    guildId: row.guildId ?? row.guild_id ?? undefined,
+    guildName: row.guildName ?? row.guild_name ?? undefined,
+    parentId: row.parentId ?? row.parent_id ?? undefined,
+    topic: row.topic ?? undefined,
+    type: row.type ?? undefined,
+  }
+}
+
+export function rowToMessageRecord(row: any): MessageRecord {
+  return {
+    id: String(row.id),
+    channelId: String(row.channelId ?? row.channel_id),
+    authorId: String(row.authorId ?? row.author_id),
+    authorName: String(row.authorName ?? row.author_name),
+    content: (row.content as string) ?? '',
+    timestamp: String(row.timestamp),
+    editedTimestamp: row.editedTimestamp ?? row.edited_timestamp ?? undefined,
+    isBot: row.isBot === true || row.is_bot === 1 || row.is_bot === true,
+    messageType: row.messageType ?? row.message_type ?? undefined,
+    pinned: row.pinned === 1 || row.pinned === true,
+    attachments: parseJson<any[]>(row.attachments),
+    embeds: parseJson<any[]>(row.embeds),
+    stickers: parseJson<any[]>(row.stickers),
+    reactions: parseJson<any[]>(row.reactions),
+    replyToId: row.replyToId ?? row.reply_to_id ?? undefined,
+    threadId: row.threadId ?? row.thread_id ?? undefined,
+  }
 }
 
 export interface MessageRecord {
@@ -315,10 +358,10 @@ export async function getChannelBackfillStatus(db: Client, channelId: string): P
 
 export async function getChannels(db: Client): Promise<ChannelRecord[]> {
   const result = await db.execute(`
-    SELECT id, name, guild_id as guildId, guild_name as guildName, parent_id as parentId, topic, type
+    SELECT id, name, guild_id, guild_name, parent_id, topic, type
     FROM channels
   `)
-  return result.rows as ChannelRecord[]
+  return result.rows.map(rowToChannelRecord)
 }
 
 export async function getMessages(db: Client, channelId: string, limit: number): Promise<MessageRecord[]> {
@@ -326,7 +369,7 @@ export async function getMessages(db: Client, channelId: string, limit: number):
     sql: `SELECT * FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?`,
     args: [channelId, limit],
   })
-  return result.rows as MessageRecord[]
+  return result.rows.map(rowToMessageRecord)
 }
 
 export async function getMessagesSince(db: Client, channelId: string, timestamp: string, excludeAuthorId?: string): Promise<MessageRecord[]> {
@@ -341,7 +384,15 @@ export async function getMessagesSince(db: Client, channelId: string, timestamp:
     sql += ` ORDER BY timestamp DESC`
 
     const result = await db.execute({ sql, args })
-    return result.rows as MessageRecord[]
+    return result.rows.map(rowToMessageRecord)
+}
+
+export async function getMessagesBefore(db: Client, channelId: string, beforeId: string, limit: number): Promise<MessageRecord[]> {
+  const result = await db.execute({
+    sql: `SELECT * FROM messages WHERE channel_id = ? AND id < ? ORDER BY timestamp DESC LIMIT ?`,
+    args: [channelId, beforeId, limit],
+  })
+  return result.rows.map(rowToMessageRecord)
 }
 
 export async function getNewestMessageTimestamp(db: Client, channelId: string): Promise<string | null> {

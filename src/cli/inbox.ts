@@ -22,6 +22,8 @@ import {
   getChannels,
   getMessagesSince,
   getMessages,
+  getMessagesBefore,
+  rowToMessageRecord,
   ChannelRecord,
   MessageRecord,
 } from './db'
@@ -85,7 +87,7 @@ async function buildInbox(
     }
     
     const visitKey = `discord:${channel.id}`
-    const channelVisit = visitData[visitKey]
+    const channelVisit = visitData[visitKey] ?? visitData[channel.id] // Backwards compatibility
 
     if (!channelVisit) {
       channelInfo.group = 'unfollowed'
@@ -191,28 +193,20 @@ async function getMessagesForChannel(channel: ChannelInfo, limit: number, realti
 }
 
 async function getOlderMessagesForChannel(channel: ChannelInfo, oldestMessageId: string, limit: number, realtimeDb: LibsqlClient, archiveDb: LibsqlClient): Promise<{ messages: MessageInfo[]; newCount: number; hasMore: boolean }> {
-  const allMessagesMap = new Map<string, MessageInfo>();
-  const allRecords: MessageRecord[] = [];
+  const allMessagesMap = new Map<string, MessageRecord>(); // Changed to MessageRecord
+  
+  const realtimeRecords = await getMessagesBefore(realtimeDb, channel.id, oldestMessageId, limit);
+  realtimeRecords.forEach(rec => allMessagesMap.set(rec.id, rec));
 
-  const realtimeRecords = await realtimeDb.execute({
-    sql: `SELECT * FROM messages WHERE channel_id = ? AND id < ? ORDER BY timestamp DESC LIMIT ?`,
-    args: [channel.id, oldestMessageId, limit]
-  });
-  realtimeRecords.rows.forEach(row => allRecords.push(row as MessageRecord));
-
-  if (allRecords.length < limit) {
-    const archiveRecords = await archiveDb.execute({
-      sql: `SELECT * FROM messages WHERE channel_id = ? AND id < ? ORDER BY timestamp DESC LIMIT ?`,
-      args: [channel.id, oldestMessageId, limit - allRecords.length]
-    });
-    archiveRecords.rows.forEach(row => {
-      if (!allRecords.some(msg => msg.id === (row as MessageRecord).id)) {
-        allRecords.push(row as MessageRecord);
+  if (allMessagesMap.size < limit) {
+    const archiveRecords = await getMessagesBefore(archiveDb, channel.id, oldestMessageId, limit - allMessagesMap.size);
+    archiveRecords.forEach(rec => {
+      if (!allMessagesMap.has(rec.id)) {
+        allMessagesMap.set(rec.id, rec);
       }
     });
   }
-
-  const messages = allRecords
+  const messages = Array.from(allMessagesMap.values()) // Changed to use allMessagesMap
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     .map(dbRecordToMessageInfo);
   
@@ -236,7 +230,7 @@ async function main() {
       process.exit(0)
     }
 
-    const collapsedSections = new Set<SectionName>(['unfollowed'])
+    const collapsedSections = new Set<SectionName>()
     
     const realtimeDb = getClient('realtime', 'local')
     const archiveDb = getClient('archive', 'local')

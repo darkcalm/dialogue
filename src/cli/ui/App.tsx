@@ -450,7 +450,7 @@ function findInputIndexForChannel(flatItems: FlatItem[], channelId: string): num
 // Get the channel ID that a flat item belongs to (or the nearest one for headers)
 function getChannelIdFromFlatItem(item: FlatItem): string | null {
   if (item.type === 'channel' || item.type === 'message' || item.type === 'input') {
-    return item.id // Corrected to use item.id for ChannelInfo
+    return item.channelId // Corrected to use item.channelId for ChannelInfo
   }
   return null
 }
@@ -1578,7 +1578,7 @@ export function App({
             .replace(/\\\\:llm$/, '')
             .trim()
           // Build context for LLM from expanded channel data
-          const channelData = state.expandedChannelData.get(channel.id)
+          const channelData = state.expandedChannelData.get(state.selectedChannel.id)
           const llmContext: LLMContext = {
             channelName: state.selectedChannel?.name,
             guildName: state.selectedChannel?.guildName,
