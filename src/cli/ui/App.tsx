@@ -1175,31 +1175,37 @@ export function App({
     }
   }, [stdout])
 
-  // // Enable mouse wheel scrolling
-  // useEffect(() => {
-  //   const stdin = process.stdin
-  //   if (!stdin.setRawMode) return
-  //   process.stdout.write('\x1b[?1000h')
-  //   process.stdout.write('\x1b[?1006h')
-  //   const handleData = (data: Buffer) => {
-  //     const str = data.toString()
-  //     const sgrMatch = str.match(/\x1b\[<(\d+);\d+;\d+[Mm]/)
-  //     if (sgrMatch) {
-  //       const button = parseInt(sgrMatch[1], 10)
-  //       if (button === 64) {
-  //         dispatch({ type: 'SELECT_FLAT_INDEX', index: state.selectedFlatIndex - 3 })
-  //       } else if (button === 65) {
-  //         dispatch({ type: 'SELECT_FLAT_INDEX', index: state.selectedFlatIndex + 3 })
-  //       }
-  //     }
-  //   }
-  //   stdin.on('data', handleData)
-  //   return () => {
-  //     stdin.off('data', handleData)
-  //     process.stdout.write('\x1b[?1006l')
-  //     process.stdout.write('\x1b[?1000l')
-  //   }
-  // }, [state.selectedFlatIndex])
+  // Enable mouse click to move focus
+  useEffect(() => {
+    const stdin = process.stdin
+    if (!stdin.setRawMode) return
+
+    process.stdout.write('\x1b[?1000h')
+    process.stdout.write('\x1b[?1006h')
+
+    const handleData = (data: Buffer) => {
+      const str = data.toString()
+      const sgrMatch = str.match(/\x1b\[<(\d+);\d+;(\d+)([Mm])/)
+      if (!sgrMatch) return
+      const button = parseInt(sgrMatch[1], 10)
+      const y = parseInt(sgrMatch[2], 10)
+      const isRelease = sgrMatch[3] === 'm'
+
+      if (button === 0 && isRelease) {
+        const flatIndex = y - 2
+        if (flatIndex >= 0 && flatIndex < state.flatItems.length) {
+          dispatch({ type: 'SELECT_FLAT_INDEX', index: flatIndex })
+        }
+      }
+    }
+
+    stdin.on('data', handleData)
+    return () => {
+      stdin.off('data', handleData)
+      process.stdout.write('\x1b[?1006l')
+      process.stdout.write('\x1b[?1000l')
+    }
+  }, [state.flatItems.length])
 
   // Rebuild flat items when channels, expanded state, or data changes
   useEffect(() => {
@@ -2024,23 +2030,32 @@ export function App({
                 }
                 return
               }
-              if (input === 'k') { // Mark channel read
+              if (input === 'v') {
+                if (selectedFlatItem?.type === 'message') {
+                  const channelData = state.expandedChannelData.get(selectedFlatItem.channelId)
+                  const msg = channelData?.messages[selectedFlatItem.messageIndex]
+                  if (msg) {
+                    dispatch({ type: 'SET_MESSAGE_DETAIL', detail: {
+                      author: msg.author,
+                      timestamp: msg.timestamp,
+                      content: msg.content,
+                      reactions: Array.isArray(msg.reactions) ? msg.reactions.map((r: any) => `${r.emoji}${r.count}`).join(' ') : ''
+                    }})
+                  }
+                }
+                return
+              }
+              if (input === 'k') {
                 const selectedChannelId = getChannelIdFromFlatItem(selectedFlatItem!)
                 if (selectedChannelId) {
                   markChannelVisited(selectedChannelId, undefined, client?.type || 'discord')
-                  dispatch({ type: 'MARK_CHANNEL_READ', channelId: selectedChannelId })
-                  // Rebuild flat items if necessary
-                  const newFlatItems = buildFlatItems(
-                    state.channelDisplayItems,
-                    state.channels,
-                    state.expandedChannels,
-                    state.expandedChannelData,
-                    getChannelFromDisplayIndex,
-                    state.readerFocusChannel,
-                    state.channelMessageOffsets
-                  )
-                  dispatch({ type: 'SET_FLAT_ITEMS', items: newFlatItems })
+                  if (onRefreshChannels) {
+                    void onRefreshChannels().then(({ channels, displayItems }) => {
+                      dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+                    })
+                  }
                 }
+                return
               }
             }
             // --- Compose mode (handled by SimpleTextInput) ---
@@ -2248,4 +2263,7 @@ export function App({
   )
 }
 // This is the missing export
-export const renderApp = (props: AppProps) => render(<App {...props} />)
+export const renderApp = (props: AppProps) => {
+  process.stdout.write('\x1b[2J\x1b[H')
+  return render(<App {...props} />)
+}
