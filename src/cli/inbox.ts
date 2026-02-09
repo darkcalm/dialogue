@@ -36,12 +36,38 @@ interface InboxChannelInfo extends ChannelInfo {
 
 export type SectionName = 'new' | 'following' | 'unfollowed_new' | 'unfollowed'
 
+// Lookup maps for resolving Discord mentions in stored content
+let userNameMap = new Map<string, string>()
+let channelNameMap = new Map<string, string>()
+
+function resolveMentions(content: string): string {
+  return content
+    .replace(/<@!?(\d+)>/g, (_, id) => `@${userNameMap.get(id) ?? 'unknown-user'}`)
+    .replace(/<#(\d+)>/g, (_, id) => `#${channelNameMap.get(id) ?? 'unknown-channel'}`)
+}
+
+async function buildMentionMaps(realtimeDb: LibsqlClient, archiveDb: LibsqlClient): Promise<void> {
+  const channels = [
+    ...await getChannels(realtimeDb),
+    ...await getChannels(archiveDb),
+  ]
+  for (const ch of channels) channelNameMap.set(ch.id, ch.name)
+
+  for (const db of [realtimeDb, archiveDb]) {
+    const result = await db.execute('SELECT DISTINCT author_id, author_name FROM messages')
+    for (const row of result.rows) {
+      const id = String(row.author_id)
+      if (!userNameMap.has(id)) userNameMap.set(id, String(row.author_name))
+    }
+  }
+}
+
 // Helper to convert DB MessageRecord to UI MessageInfo
 const dbRecordToMessageInfo = (record: MessageRecord): MessageInfo => ({
   id: record.id,
   author: record.authorName,
   authorId: record.authorId,
-  content: record.content,
+  content: resolveMentions(record.content),
   timestamp: record.timestamp,
   date: new Date(record.timestamp),
   isBot: record.isBot,
@@ -269,6 +295,7 @@ async function main() {
     const botUserId = platformClient.getCurrentUser()?.id
     
     console.log('📥 Loading inbox...')
+    await buildMentionMaps(realtimeDb, archiveDb)
     let inboxData = await buildInbox(realtimeDb, archiveDb, collapsedSections, botUserId)
 
     if (inboxData.channels.length === 0) {
