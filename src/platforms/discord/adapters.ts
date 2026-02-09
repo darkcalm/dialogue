@@ -75,6 +75,7 @@ export function adaptDiscordChannel(
     metadata: {
       nativeChannel: channel,
       guildId: 'guild' in channel && channel.guild ? channel.guild.id : undefined,
+      lastMessageId: 'lastMessageId' in channel ? channel.lastMessageId : undefined,
     },
   }
 }

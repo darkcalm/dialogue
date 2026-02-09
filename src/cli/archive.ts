@@ -29,7 +29,7 @@ import {
 
 // Configuration
 const FETCH_BATCH_SIZE = 100
-const FRONTFILL_BATCH_SIZE = 5
+const FRONTFILL_BATCH_SIZE = 10
 
 // State
 let isRunning = true
@@ -80,49 +80,58 @@ function channelToRecord(ch: IPlatformChannel): ChannelRecord {
   }
 }
 
-async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: Client, channels: IPlatformChannel[]): Promise<void> {
-  const stats = await getChannelStats(localDb)
-  const statsMap = new Map(stats.map((s) => [s.id, s]))
-  
-  const sortedChannels = [...channels].sort((a, b) => {
-    const aStats = statsMap.get(a.id)
-    const bStats = statsMap.get(b.id)
-    if (!aStats && bStats) return -1
-    if (aStats && !bStats) return 1
-    if (!aStats && !bStats) return 0
-    if (aStats.newestMessageDate && bStats.newestMessageDate) {
-      return new Date(bStats.newestMessageDate).getTime() - new Date(aStats.newestMessageDate).getTime()
-    }
-    return 0
-  })
+function snowflakeToTimestamp(snowflake: string): number {
+  const DISCORD_EPOCH = 1420070400000n
+  return Number((BigInt(snowflake) >> 22n) + DISCORD_EPOCH)
+}
 
-  // Pre-filter out already completed channels
+async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: Client, channels: IPlatformChannel[]): Promise<void> {
   const backfillStatuses = await Promise.all(
-    sortedChannels.map(ch => getChannelBackfillStatus(localDb, ch.id))
+    channels.map(ch => getChannelBackfillStatus(localDb, ch.id))
   )
-  const incompleteChannels = sortedChannels.filter((ch, i) =>
+  const incompleteChannels = channels.filter((ch, i) =>
     backfillStatuses[i]?.oldestFetchedId !== 'COMPLETE'
   )
 
-  const activeChannels = new Set(incompleteChannels.map((ch) => ch.id))
+  const completedSet = new Set<string>()
   const channelMap = new Map(channels.map((ch) => [ch.id, ch]))
+  // Track the frontier: for unfetched channels this is lastMessageId,
+  // after a fetch it becomes the oldest fetched message ID (the next unfetched is just before it)
+  const frontierMap = new Map<string, string | null>(
+    incompleteChannels.map(ch => [ch.id, ch.metadata?.lastMessageId ?? null])
+  )
 
-  log(`Starting prioritized frontfill for ${activeChannels.size} channels (${sortedChannels.length - incompleteChannels.length} already complete)...`)
+  const threadCount = incompleteChannels.filter(ch => ch.type === 'thread').length
+  const textCount = incompleteChannels.length - threadCount
+  log(`Starting prioritized frontfill for ${textCount} channels + ${threadCount} threads (${channels.length - incompleteChannels.length} already complete)...`)
 
   let consecutiveNoProgress = 0
   const maxConsecutiveNoProgress = 3
 
-  while (isRunning && activeChannels.size > 0) {
-    const channelsToProcess = Array.from(activeChannels).slice(0, FRONTFILL_BATCH_SIZE)
-    log(`Frontfilling ${channelsToProcess.length} channels...`)
+  while (isRunning) {
+    // Re-sort each round by frontier (most recent unfetched first)
+    const remaining = incompleteChannels.filter(ch => !completedSet.has(ch.id))
+    if (remaining.length === 0) break
+
+    remaining.sort((a, b) => {
+      const aFrontier = frontierMap.get(a.id)
+      const bFrontier = frontierMap.get(b.id)
+      if (!aFrontier && bFrontier) return 1
+      if (aFrontier && !bFrontier) return -1
+      if (!aFrontier && !bFrontier) return 0
+      return snowflakeToTimestamp(bFrontier!) - snowflakeToTimestamp(aFrontier!)
+    })
+
+    const batch = remaining.slice(0, FRONTFILL_BATCH_SIZE)
+
+    const batchThreads = batch.filter(ch => ch.type === 'thread').length
+    const batchTexts = batch.length - batchThreads
+    log(`Frontfilling ${batchTexts} channels + ${batchThreads} threads (${remaining.length} remaining)...`)
 
     const fetchResults = await Promise.allSettled(
-      channelsToProcess.map(async (channelId) => {
-        const channel = channelMap.get(channelId)
-        if (!channel) return { channelId, messages: [], hasMore: false }
-        
+      batch.map(async (channel) => {
         const status = await getChannelBackfillStatus(localDb, channel.id)
-        if (status?.oldestFetchedId === 'COMPLETE') return { channelId, messages: [], hasMore: false }
+        if (status?.oldestFetchedId === 'COMPLETE') return { channelId: channel.id, messages: [] as IPlatformMessage[], hasMore: false }
         
         const oldestId = await getOldestMessageId(localDb, channel.id)
         
@@ -134,20 +143,20 @@ async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: C
           if (messages.length === 0) {
             await updateChannelOldestFetched(localDb, channel.id, 'COMPLETE')
             log(`  ✓ #${channel.name}: Frontfill complete`)
-            return { channelId, messages: [], hasMore: false }
+            return { channelId: channel.id, messages: [] as IPlatformMessage[], hasMore: false }
           }
           
           const existenceChecks = await Promise.all(messages.map(msg => messageExists(localDb, msg.id)))
           if (existenceChecks.every(exists => exists)) {
             await updateChannelOldestFetched(localDb, channel.id, 'COMPLETE')
             log(`  ✓ #${channel.name}: Frontfill complete (caught up to existing messages)`)
-            return { channelId, messages: [], hasMore: false }
+            return { channelId: channel.id, messages: [] as IPlatformMessage[], hasMore: false }
           }
 
-          return { channelId, messages, hasMore: messages.length === FETCH_BATCH_SIZE }
+          return { channelId: channel.id, messages, hasMore: messages.length === FETCH_BATCH_SIZE }
         } catch (error) {
           log(`  ✗ #${channel.name}: ${error instanceof Error ? error.message : 'Unknown'}`)
-          return { channelId, messages: [], hasMore: false }
+          return { channelId: channel.id, messages: [] as IPlatformMessage[], hasMore: false }
         }
       })
     )
@@ -159,18 +168,22 @@ async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: C
         if (result.status === 'fulfilled' && result.value) {
             const { channelId, messages, hasMore } = result.value
             if (!hasMore) {
-              activeChannels.delete(channelId)
+              completedSet.add(channelId)
               channelsCompleted++
             }
             if (messages.length > 0) {
                 batchMadeProgress = true
                 await saveMessages(localDb, messages.map(messageToRecord))
-                log(`  💾 Saved ${messages.length} messages for channel ${channelId}`)
+                // Update frontier to the oldest message we just fetched
+                const oldestMsg = messages.reduce((oldest, msg) =>
+                  BigInt(msg.id) < BigInt(oldest.id) ? msg : oldest
+                )
+                frontierMap.set(channelId, oldestMsg.id)
+                log(`  💾 Saved ${messages.length} messages for #${channelMap.get(channelId)?.name ?? channelId}`)
             }
         }
     }
 
-    // Count both message saves AND channel completions as progress
     if (!batchMadeProgress && channelsCompleted === 0) {
       consecutiveNoProgress++
       if (consecutiveNoProgress >= maxConsecutiveNoProgress) {
@@ -179,18 +192,9 @@ async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: C
       }
     } else {
       consecutiveNoProgress = 0
-      if (channelsCompleted > 0 && !batchMadeProgress) {
-        log(`  ✓ ${channelsCompleted} channel(s) completed`)
-      }
-    }
-
-    if (activeChannels.size > 0) {
-        // This function would need to be added to db.ts
-        // const currentStats = await getTotalStats(localDb)
-        // log(`Progress: ${currentStats.totalMessages} messages, ${activeChannels.size} channels remaining`)
     }
     
-    if (isRunning && activeChannels.size > 0) await sleep(2000)
+    if (isRunning && remaining.length > batch.length) await sleep(2000)
   }
 }
 
@@ -268,7 +272,7 @@ async function main(): Promise<void> {
     await discordClient.connect()
     log('Connected to Discord!')
 
-    log('Fetching channel list...')
+    log('Fetching channels & threads...')
     const channels = await discordClient.getChannels()
     await saveChannels(localDb, channels.map(channelToRecord))
     
