@@ -3,8 +3,9 @@
  * Single-column layout with view switching
  */
 
-import React, { useReducer, useCallback, useEffect, useState } from 'react'
+import React, { useReducer, useCallback, useEffect, useState, useRef } from 'react'
 import { render, Box, Text, useApp, useInput, useStdout } from 'ink'
+import { execSync } from 'child_process'
 import { IPlatformClient } from '@/platforms/types'
 import type { SectionName } from '../inbox'
 import {
@@ -92,7 +93,7 @@ export interface AppState {
     author: string
     timestamp: string
     content: string
-    reactions?: string
+    reactions?: Array<{ emoji: string; count: number; users: string[] }>
   } | null
 
   // Terminal dimensions
@@ -130,7 +131,7 @@ type Action =
   | { type: 'SET_LOADING'; loading: boolean }
   | { type: 'SET_LOADING_OLDER'; loading: boolean }
   | { type: 'SET_HAS_MORE_OLDER'; hasMore: boolean }
-  | { type: 'SET_MESSAGE_DETAIL'; detail: { author: string; timestamp: string; content: string; reactions?: string } | null }
+  | { type: 'SET_MESSAGE_DETAIL'; detail: { author: string; timestamp: string; content: string; reactions?: Array<{ emoji: string; count: number; users: string[] }> } | null }
   | { type: 'RESET_MESSAGE_STATE' }
   | { type: 'SET_DIMENSIONS'; rows: number; cols: number }
   // Unified view actions
@@ -820,7 +821,7 @@ interface MessageDetailViewProps {
     author: string
     timestamp: string
     content: string
-    reactions?: string
+    reactions?: Array<{ emoji: string; count: number; users: string[] }>
   }
 }
 
@@ -841,10 +842,12 @@ function MessageDetailView({ message }: MessageDetailViewProps) {
            <Text key={i}>{line}</Text>
          ))}
        </Box>
-       {message.reactions && (
-         <Box flexDirection="column">
+       {message.reactions && message.reactions.length > 0 && (
+         <Box flexDirection="column" marginTop={1}>
           <Text color="yellow" bold>Reactions:</Text>
-          <Text>{message.reactions}</Text>
+          {message.reactions.map((r, i) => (
+            <Text key={i}>  {r.emoji} {r.count} — {r.users.length > 0 ? r.users.join(', ') : 'unknown'}</Text>
+          ))}
         </Box>
       )}
       <Text color="gray" dimColor>Press Esc or q to close</Text>
@@ -872,6 +875,7 @@ interface UnifiedViewProps {
   onSubmitUnified: (text: string) => void // Renamed prop
   replyingToMessageId: string | null
   rows: number
+  cols: number
   viewportOffset: number
   getChannelFromDisplayIndex: (index: number, channels: ChannelInfo[]) => ChannelInfo | null
 }
@@ -894,6 +898,7 @@ function UnifiedView({
   onSubmitUnified, // Renamed prop
   replyingToMessageId,
   rows,
+  cols,
   viewportOffset,
   getChannelFromDisplayIndex,
 }: UnifiedViewProps) {
@@ -974,6 +979,11 @@ function UnifiedView({
                 ? ' ' + msg.reactions.map((r) => `${r.emoji}${r.count}`).join(' ')
                   : ''
 
+              const prefix = `    ${isSelected ? '▶ ' : '  '}[${msg.timestamp}] ${msg.author}${attachmentIndicator}: `
+              const firstLine = msg.content.split('\n')[0]
+              const maxContentLen = Math.max(10, cols - prefix.length - reactionsText.length - 4)
+              const truncatedContent = firstLine.length > maxContentLen ? firstLine.slice(0, maxContentLen - 1) + '…' : firstLine
+
               allRenderedItems.push(
                 <Text
                   key={`msg-${channel.id}-${msg.id}`}
@@ -983,7 +993,7 @@ function UnifiedView({
                   {'    '}
                   {isSelected ? '▶ ' : '  '}
                   [{msg.timestamp}] {msg.author}
-                  {attachmentIndicator}: {msg.content.split('\n')[0]}
+                  {attachmentIndicator}: {truncatedContent}
                   {reactionsText}
                 </Text>
               )
@@ -1197,7 +1207,8 @@ export function App({
     }
   }, [stdout])
 
-  // Enable mouse click to move focus
+  // Enable mouse click to move focus + double-click to copy
+  const lastClickRef = useRef<{ flatIndex: number; time: number }>({ flatIndex: -1, time: 0 })
   useEffect(() => {
     const stdin = process.stdin
     if (!stdin.setRawMode) return
@@ -1214,11 +1225,30 @@ export function App({
       const isRelease = sgrMatch[3] === 'm'
 
       if (button === 0 && isRelease) {
-        // y-2 gives us the line on screen (accounting for title bar)
-        // Add viewportOffset to get the actual flat item index
         const flatIndex = (y - 2) + state.viewportOffset
         if (flatIndex >= 0 && flatIndex < state.flatItems.length) {
-          dispatch({ type: 'SELECT_FLAT_INDEX', index: flatIndex })
+          const now = Date.now()
+          const last = lastClickRef.current
+
+          if (last.flatIndex === flatIndex && now - last.time < 400) {
+            const item = state.flatItems[flatIndex]
+            if (item.type === 'message') {
+              const channelData = state.expandedChannelData.get(item.channelId)
+              const msg = channelData?.messages[item.messageIndex]
+              if (msg) {
+                try {
+                  execSync('pbcopy', { input: msg.content })
+                  dispatch({ type: 'SET_STATUS', text: '📋 Message copied to clipboard' })
+                } catch {
+                  dispatch({ type: 'SET_STATUS', text: '❌ Failed to copy' })
+                }
+              }
+            }
+            lastClickRef.current = { flatIndex: -1, time: 0 }
+          } else {
+            lastClickRef.current = { flatIndex, time: now }
+            dispatch({ type: 'SELECT_FLAT_INDEX', index: flatIndex })
+          }
         }
       }
     }
@@ -1229,7 +1259,7 @@ export function App({
       process.stdout.write('\x1b[?1006l')
       process.stdout.write('\x1b[?1000l')
     }
-  }, [state.flatItems.length, state.viewportOffset])
+  }, [state.flatItems, state.viewportOffset, state.expandedChannelData])
 
   // Rebuild flat items when channels, expanded state, or data changes
   useEffect(() => {
@@ -1269,68 +1299,7 @@ export function App({
     [getMessagesForChannel]
   )
 
-  // Auto-expand channels with new messages on startup
-  const [hasLoadedInitialChannels, setHasLoadedInitialChannels] = useState(false)
-  useEffect(() => {
-    if (hasLoadedInitialChannels || channelsWithNewMessages.length === 0) return
-    setHasLoadedInitialChannels(true)
 
-    const loadAllNewChannels = async () => {
-      dispatch({ type: 'SET_LOADING', loading: true })
-      dispatch({ type: 'SET_STATUS', text: 'Loading new messages...' })
-
-      const expandedSet = new Set<string>()
-      const dataMap = new Map<string, ExpandedChannelData>()
-
-      for (const channel of channelsWithNewMessages) {
-        expandedSet.add(channel.id)
-        dataMap.set(channel.id, {
-          channelId: channel.id,
-          messages: [],
-          isLoading: true,
-          hasMoreOlderMessages: true,
-        })
-      }
-
-      dispatch({ type: 'SET_EXPANDED_CHANNELS', expandedChannels: expandedSet, expandedChannelData: dataMap })
-
-      // Load messages for each channel
-      for (const channel of channelsWithNewMessages) {
-        try {
-          const messages = await loadMessagesForChannelInternal(channel)
-          dispatch({
-            type: 'SET_EXPANDED_CHANNEL_DATA',
-            channelId: channel.id,
-            data: {
-              channelId: channel.id,
-              messages,
-              isLoading: false,
-              hasMoreOlderMessages: true,
-            },
-          })
-        } catch {
-          dispatch({
-            type: 'SET_EXPANDED_CHANNEL_DATA',
-            channelId: channel.id,
-            data: {
-              channelId: channel.id,
-              messages: [],
-              isLoading: false,
-              hasMoreOlderMessages: false,
-            },
-          })
-        }
-      }
-
-      dispatch({ type: 'SET_LOADING', loading: false })
-      dispatch({
-        type: 'SET_STATUS',
-        text: `${title}`,
-      })
-    }
-
-    void loadAllNewChannels()
-  }, [channelsWithNewMessages, hasLoadedInitialChannels, loadMessagesForChannelInternal, title])
 
   // Subscribe to real-time message events and update cache + UI
   useEffect(() => {
@@ -2030,7 +1999,7 @@ export function App({
                       author: msg.author,
                       timestamp: msg.timestamp,
                       content: msg.content,
-                      reactions: Array.isArray(msg.reactions) ? msg.reactions.map(r => `${r.emoji}${r.count}`).join(' ') : ''
+                      reactions: Array.isArray(msg.reactions) && msg.reactions.length > 0 ? msg.reactions : undefined
                     }})
                   }
                   return
@@ -2105,7 +2074,7 @@ export function App({
                       author: msg.author,
                       timestamp: msg.timestamp,
                       content: msg.content,
-                      reactions: Array.isArray(msg.reactions) ? msg.reactions.map((r: any) => `${r.emoji}${r.count}`).join(' ') : ''
+                      reactions: Array.isArray(msg.reactions) && msg.reactions.length > 0 ? msg.reactions : undefined
                     }})
                   }
                 }
@@ -2197,7 +2166,7 @@ export function App({
                   author: selectedMsg.author,
                   timestamp: selectedMsg.timestamp,
                   content: selectedMsg.content,
-                  reactions: Array.isArray(selectedMsg.reactions) ? selectedMsg.reactions.map((r: any) => `${r.emoji}${r.count}`).join(' ') : ''
+                  reactions: Array.isArray(selectedMsg.reactions) && selectedMsg.reactions.length > 0 ? selectedMsg.reactions : undefined
                 }})
                 return
               }
@@ -2215,15 +2184,16 @@ export function App({
               sendMessage(state.llmProcessedText)
               return
             }
-            if (input === 'e') {
-              dispatch({ type: 'SET_INPUT_TEXT', text: state.llmProcessedText })
+            if (input === 'e' || input === 'O') {
+              const editText = input === 'e' ? state.llmProcessedText : state.llmOriginalText
+              dispatch({ type: 'SET_INPUT_TEXT', text: editText })
               dispatch({ type: 'SET_VIEW', view: 'unified' })
-              dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
-              return
-            }
-            if (input === 'O') {
-              dispatch({ type: 'SET_INPUT_TEXT', text: state.llmOriginalText })
-              dispatch({ type: 'SET_VIEW', view: 'unified' })
+              if (state.selectedChannel) {
+                const inputIdx = findInputIndexForChannel(state.flatItems, state.selectedChannel.id)
+                if (inputIdx !== -1) {
+                  dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIdx })
+                }
+              }
               dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
               return
             }
@@ -2303,6 +2273,7 @@ export function App({
             onSubmitUnified={sendMessage}
             replyingToMessageId={state.replyingToMessageId}
             rows={state.rows}
+            cols={state.cols}
             viewportOffset={state.viewportOffset}
             getChannelFromDisplayIndex={getChannelFromDisplayIndex}
           />
