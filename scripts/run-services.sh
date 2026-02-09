@@ -36,8 +36,13 @@ sleep 2
 echo "Starting archive (frontfill) service in the foreground..."
 npm run archive
 
-# After archive finishes, kill the realtime service
-echo "Archive service finished. Shutting down realtime service..."
-kill "$REALTIME_PID"
+# After archive finishes, keep the realtime service running
+echo "Archive service finished. Realtime service continues running..."
+echo "Realtime service PID: $REALTIME_PID"
+echo "To stop the realtime service, run: kill $REALTIME_PID"
 
-echo "--- All services stopped. ---"
+# Wait for the realtime service to finish (it should run indefinitely)
+echo "--- Waiting for realtime service... (Press Ctrl+C to stop) ---"
+wait "$REALTIME_PID"
+
+echo "--- Realtime service stopped. ---"
