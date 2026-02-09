@@ -199,38 +199,34 @@ async function runFrontfillLoop(discordClient: DiscordPlatformClient, localDb: C
 }
 
 async function syncToRemote(localDb: Client, remoteDb: Client) {
-    log('🚀 Starting full replacement sync from local archive to remote Turso archive...')
+    log('🚀 Starting incremental sync from local archive to remote Turso archive...')
 
-    // Clear remote database completely
-    log('Dropping existing remote tables...')
-    await remoteDb.execute('DROP TABLE IF EXISTS messages')
-    await remoteDb.execute('DROP TABLE IF EXISTS channel_events')
-    await remoteDb.execute('DROP TABLE IF EXISTS channels')
-
-    // Recreate schema
-    log('Recreating remote schema...')
+    // Ensure remote schema exists (idempotent - won't recreate if exists)
+    log('Ensuring remote schema exists...')
     await initDB(remoteDb)
 
     const channels = (await localDb.execute("SELECT * FROM channels")).rows
     const messages = (await localDb.execute("SELECT * FROM messages")).rows
 
-    log(`Uploading ${channels.length} channels and ${messages.length} messages...`)
+    log(`Syncing ${channels.length} channels and ${messages.length} messages...`)
 
+    // Use existing upsert functions - they only write when data changes
     if (channels.length > 0) {
         await saveChannels(remoteDb, channels.map(rowToChannelRecord))
-        log(`  ✓ Uploaded ${channels.length} channels`)
+        log(`  ✓ Synced ${channels.length} channels`)
     }
+
     if (messages.length > 0) {
         const chunkSize = 500
         const allRecords = messages.map(rowToMessageRecord)
         for (let i = 0; i < allRecords.length; i += chunkSize) {
             const chunk = allRecords.slice(i, i + chunkSize)
             await saveMessages(remoteDb, chunk)
-            log(`  Uploaded ${i + chunk.length} of ${allRecords.length} messages...`)
+            log(`  Synced ${i + chunk.length} of ${allRecords.length} messages...`)
         }
     }
 
-    log('✅ Full replacement sync complete.')
+    log('✅ Incremental sync complete.')
 }
 
 
