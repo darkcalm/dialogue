@@ -80,6 +80,9 @@ export interface AppState {
   inputText: string
   inputCursorPos: number
   replyingToMessageId: string | null
+  reactingToMessageId: string | null
+  editingMessageId: string | null
+  editingChannelId: string | null
   attachedFiles: Array<{ path: string; name: string }>
   llmOriginalText: string
   llmProcessedText: string
@@ -122,6 +125,8 @@ type Action =
   | { type: 'SET_INPUT_TEXT'; text: string }
   | { type: 'SET_INPUT_CURSOR_POS'; pos: number }
   | { type: 'SET_REPLYING_TO'; messageId: string | null }
+  | { type: 'SET_REACTING_TO'; messageId: string | null }
+  | { type: 'SET_EDITING'; messageId: string | null; channelId: string | null; originalContent?: string }
   | { type: 'ADD_ATTACHMENT'; file: { path: string; name: string } }
   | { type: 'CLEAR_ATTACHMENTS' }
   | { type: 'SET_LLM_TEXTS'; original: string; processed: string }
@@ -246,6 +251,16 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, inputCursorPos: action.pos }
     case 'SET_REPLYING_TO':
       return { ...state, replyingToMessageId: action.messageId }
+    case 'SET_REACTING_TO':
+      return { ...state, reactingToMessageId: action.messageId }
+    case 'SET_EDITING':
+      return {
+        ...state,
+        editingMessageId: action.messageId,
+        editingChannelId: action.channelId,
+        inputText: action.originalContent || '',
+        inputCursorPos: action.originalContent?.length || 0
+      }
     case 'ADD_ATTACHMENT':
       return { ...state, attachedFiles: [...state.attachedFiles, action.file] }
     case 'CLEAR_ATTACHMENTS':
@@ -274,6 +289,9 @@ function reducer(state: AppState, action: Action): AppState {
         inputText: '',
         inputCursorPos: 0,
         replyingToMessageId: null,
+        reactingToMessageId: null,
+        editingMessageId: null,
+        editingChannelId: null,
         attachedFiles: [],
         llmOriginalText: '',
         llmProcessedText: '',
@@ -781,6 +799,7 @@ function ReactView({
           onCursorChange={onCursorChange}
           onSubmit={onSubmit}
           placeholder="Enter emoji (e.g., 👍 or :thumbsup:)"
+          focus={true}
         />
       </Box>
     </Box>
@@ -873,6 +892,8 @@ interface UnifiedViewProps {
   onCursorChange: (pos: number) => void
   onSubmitUnified: (text: string) => void // Renamed prop
   replyingToMessageId: string | null
+  reactingToMessageId: string | null
+  editingMessageId: string | null
   rows: number
   cols: number
   viewportOffset: number
@@ -896,6 +917,8 @@ function UnifiedView({
   onCursorChange,
   onSubmitUnified, // Renamed prop
   replyingToMessageId,
+  reactingToMessageId,
+  editingMessageId,
   rows,
   cols,
   viewportOffset,
@@ -1009,13 +1032,19 @@ function UnifiedView({
 
           allRenderedItems.push(
             <Box key={`input-${channel.id}`} flexDirection="column">
-              {replyingToMessageId && isSelected && (
+              {replyingToMessageId && isSelected && !editingMessageId && !reactingToMessageId && (
                 <Text color="cyan">{'    '}↳ Replying...</Text>
+              )}
+              {reactingToMessageId && isSelected && (
+                <Text color="magenta">{'    '}😀 React with emoji...</Text>
+              )}
+              {editingMessageId && isSelected && !reactingToMessageId && (
+                <Text color="yellow">{'    '}✏ Editing message...</Text>
               )}
               <Box>
                 <Text color={isComposing ? 'green' : isInputSelected ? 'cyan' : 'gray'}>
                   {'    '}
-                  {isComposing ? '✎ ' : isInputSelected ? '▶ ' : '  '}
+                  {isComposing ? (reactingToMessageId ? '😀 ' : editingMessageId ? '✏ ' : '✎ ') : isInputSelected ? '▶ ' : '  '}
                 </Text>
                 {isComposing ? (
                   <SimpleTextInput
@@ -1024,7 +1053,7 @@ function UnifiedView({
                     onChange={onInputChange}
                     onCursorChange={onCursorChange}
                     onSubmit={onSubmitUnified}
-                    placeholder="Type message (Enter=send, Esc=cancel)..."
+                    placeholder={reactingToMessageId ? "Type emoji (e.g., 👍 or :thumbsup:)..." : editingMessageId ? "Edit message (Enter=save, Esc=cancel)..." : "Type message (Enter=send, Esc=cancel)..."}
                     focus={true}
                   />
                 ) : (
@@ -1177,6 +1206,9 @@ export function App({
     inputText: '',
     inputCursorPos: 0,
     replyingToMessageId: null,
+    reactingToMessageId: null,
+    editingMessageId: null,
+    editingChannelId: null,
     attachedFiles: [],
     llmOriginalText: '',
     llmProcessedText: '',
@@ -1542,7 +1574,7 @@ export function App({
     dispatch({ type: 'SET_LOADING_OLDER', loading: false })
   }, [client, state, getOlderMessagesForChannel])
 
-  // Send message
+  // Send or edit message or add reaction
   const sendMessage = useCallback(
     async (text: string) => {
       if (!state.selectedChannel || !text.trim()) return
@@ -1550,6 +1582,98 @@ export function App({
       // Archive-only mode: no sending
       if (!client) {
         dispatch({ type: 'SET_STATUS', text: '❌ Archive mode - read only' })
+        return
+      }
+
+      // Handle reacting to a message
+      if (state.reactingToMessageId) {
+        const emoji = text.trim()
+        dispatch({ type: 'SET_STATUS', text: `Adding reaction ${emoji}...` })
+        try {
+          // Get message info
+          const channelData = state.expandedChannelData.get(state.selectedChannel.id)
+          const msgInfo = channelData?.messages.find(m => m.id === state.reactingToMessageId)
+
+          if (!msgInfo) {
+            dispatch({ type: 'SET_STATUS', text: '❌ Message not found' })
+            dispatch({ type: 'RESET_MESSAGE_STATE' })
+            dispatch({ type: 'SET_FOCUS_MODE', mode: 'navigation' })
+            return
+          }
+
+          // Try to resolve emoji for Discord
+          let resolvedEmoji = emoji
+          if (client.type === 'discord') {
+            const nativeClient = client.getNativeClient()
+            const channel = await nativeClient.channels.fetch(state.selectedChannel.id)
+            if (channel) {
+              const resolved = await resolveEmoji(emoji, channel)
+              if (resolved) {
+                resolvedEmoji = resolved
+              }
+            }
+          }
+
+          await client.addReaction(state.selectedChannel.id, msgInfo.id, resolvedEmoji)
+          dispatch({ type: 'SET_STATUS', text: `✅ Reaction ${emoji} added!` })
+          dispatch({ type: 'RESET_MESSAGE_STATE' })
+          dispatch({ type: 'SET_FOCUS_MODE', mode: 'navigation' })
+
+          // Refresh messages
+          const messages = await loadMessagesForChannelInternal(state.selectedChannel)
+          dispatch({
+            type: 'SET_EXPANDED_CHANNEL_DATA',
+            channelId: state.selectedChannel.id,
+            data: {
+              channelId: state.selectedChannel.id,
+              messages,
+              isLoading: false,
+              hasMoreOlderMessages: true,
+            },
+          })
+        } catch (err) {
+          dispatch({
+            type: 'SET_STATUS',
+            text: `❌ Reaction error: ${err instanceof Error ? err.message : 'Unknown'}`,
+          })
+          dispatch({ type: 'RESET_MESSAGE_STATE' })
+          dispatch({ type: 'SET_FOCUS_MODE', mode: 'navigation' })
+        }
+        return
+      }
+
+      // Handle editing existing message
+      if (state.editingMessageId && state.editingChannelId) {
+        dispatch({ type: 'SET_LOADING', loading: true })
+        dispatch({ type: 'SET_STATUS', text: 'Editing message...' })
+        try {
+          await client.editMessage(state.editingChannelId, state.editingMessageId, text.trim())
+          dispatch({ type: 'RESET_MESSAGE_STATE' })
+          dispatch({ type: 'SET_FOCUS_MODE', mode: 'navigation' })
+          dispatch({ type: 'SET_STATUS', text: '✅ Message edited!' })
+
+          // Refresh messages for this channel
+          const channel = state.channels.find(c => c.id === state.editingChannelId)
+          if (channel) {
+            const messages = await loadMessagesForChannelInternal(channel)
+            dispatch({
+              type: 'SET_EXPANDED_CHANNEL_DATA',
+              channelId: channel.id,
+              data: {
+                channelId: channel.id,
+                messages,
+                isLoading: false,
+                hasMoreOlderMessages: true,
+              },
+            })
+          }
+        } catch (err) {
+          dispatch({
+            type: 'SET_STATUS',
+            text: `❌ Error: ${err instanceof Error ? err.message : 'Unknown'}`,
+          })
+        }
+        dispatch({ type: 'SET_LOADING', loading: false })
         return
       }
 
@@ -1644,6 +1768,11 @@ export function App({
       state.selectedChannel,
       state.attachedFiles,
       state.replyingToMessageId,
+      state.reactingToMessageId,
+      state.editingMessageId,
+      state.editingChannelId,
+      state.channels,
+      state.expandedChannelData,
       loadMessagesForChannelInternal,
     ]
   )
@@ -1697,7 +1826,15 @@ export function App({
         return
       }
 
-      const msgInfo = state.messages[state.selectedMessageIndex]
+      // Get message from expanded channel data (unified view)
+      const channelData = state.expandedChannelData.get(state.selectedChannel.id)
+      if (!channelData || !channelData.messages[state.selectedMessageIndex]) {
+        dispatch({ type: 'SET_STATUS', text: '❌ Message not found' })
+        return
+      }
+      const msgInfo = channelData.messages[state.selectedMessageIndex]
+
+      dispatch({ type: 'SET_STATUS', text: `Adding reaction ${emoji}...` })
 
       try {
         // Try to resolve emoji for Discord (use native client for platform-specific logic)
@@ -1714,7 +1851,7 @@ export function App({
         }
 
         await client.addReaction(state.selectedChannel.id, msgInfo.id, resolvedEmoji)
-        dispatch({ type: 'SET_STATUS', text: '✅ Reaction added!' })
+        dispatch({ type: 'SET_STATUS', text: `✅ Reaction ${emoji} added!` })
         dispatch({ type: 'SET_VIEW', view: 'unified' })
         dispatch({ type: 'SET_INPUT_TEXT', text: '' })
         // Refresh messages for both legacy view and expanded channel data
@@ -1733,11 +1870,13 @@ export function App({
       } catch (err) {
         dispatch({
           type: 'SET_STATUS',
-          text: `❌ Error: ${err instanceof Error ? err.message : 'Unknown'}`,
+          text: `❌ Reaction error: ${err instanceof Error ? err.message : 'Unknown'}`,
         })
+        dispatch({ type: 'SET_VIEW', view: 'unified' })
+        dispatch({ type: 'SET_INPUT_TEXT', text: '' })
       }
     },
-    [client, state, loadMessagesForChannelInternal] // Updated
+    [client, state.selectedMessageIndex, state.selectedChannel, state.expandedChannelData, loadMessagesForChannelInternal]
   )
 
   // Open URLs from message
@@ -2019,14 +2158,17 @@ export function App({
                 }
                 return
               }
-              if (input === 'f') {
+              if (input === 'F') { // Shift+F
                 const selectedChannelId = getChannelIdFromFlatItem(selectedFlatItem!)
                 const channel = state.channels.find(c => c.id === selectedChannelId)
-                if (channel && (channel as any).group === 'unfollowed' && onFollowChannel) {
+                const channelGroup = (channel as any)?.group
+
+                // Follow if in unfollowed sections, unfollow if in followed sections
+                if (channel && (channelGroup === 'unfollowed' || channelGroup === 'unfollowed_new') && onFollowChannel) {
                   void onFollowChannel(channel).then(({ channels, displayItems }) => {
                     dispatch({ type: 'SET_CHANNELS', channels, displayItems })
                   })
-                } else if (channel && onUnfollowChannel) {
+                } else if (channel && (channelGroup === 'following' || channelGroup === 'new') && onUnfollowChannel) {
                   void onUnfollowChannel(channel).then(({ channels, displayItems }) => {
                     dispatch({ type: 'SET_CHANNELS', channels, displayItems })
                   })
@@ -2040,14 +2182,43 @@ export function App({
                 }
                 return
               }
-              if (input === 'o') { // Open URL
+              if (input === 'o') { // Open URLs
                 const selectedChannelId = getChannelIdFromFlatItem(selectedFlatItem!)
                 const channelData = state.expandedChannelData.get(selectedChannelId!)
                 if (selectedFlatItem?.type === 'message' && channelData) {
                   const msg = channelData.messages[selectedFlatItem.messageIndex]
                   if (msg) {
                     const urls = extractUrls(msg.content)
-                    if (urls.length > 0) openUrlInBrowser(urls[0])
+                    if (urls.length === 0) {
+                      dispatch({ type: 'SET_STATUS', text: 'No URLs in this message' })
+                    } else {
+                      for (const url of urls) {
+                        openUrlInBrowser(url)
+                      }
+                      dispatch({ type: 'SET_STATUS', text: `Opened ${urls.length} URL${urls.length > 1 ? 's' : ''}` })
+                    }
+                  }
+                }
+                return
+              }
+              if (input === 'a') { // Download attachments
+                const selectedChannelId = getChannelIdFromFlatItem(selectedFlatItem!)
+                const channelData = state.expandedChannelData.get(selectedChannelId!)
+                if (selectedFlatItem?.type === 'message' && channelData) {
+                  const msg = channelData.messages[selectedFlatItem.messageIndex]
+                  if (msg) {
+                    if (!msg.attachments || msg.attachments.length === 0) {
+                      dispatch({ type: 'SET_STATUS', text: 'No attachments on this message' })
+                    } else {
+                      dispatch({ type: 'SET_LOADING', loading: true })
+                      void downloadAttachmentsFromInfo(msg.attachments, (status) => {
+                        dispatch({ type: 'SET_STATUS', text: status })
+                      }).catch((err) => {
+                        dispatch({ type: 'SET_STATUS', text: `❌ Download failed: ${err instanceof Error ? err.message : 'Unknown error'}` })
+                      }).finally(() => {
+                        dispatch({ type: 'SET_LOADING', loading: false })
+                      })
+                    }
                   }
                 }
                 return
@@ -2063,6 +2234,119 @@ export function App({
                       content: msg.content,
                       reactions: Array.isArray(msg.reactions) && msg.reactions.length > 0 ? msg.reactions : undefined
                     }})
+                  }
+                }
+                return
+              }
+              if (input === 'd') {
+                // Delete message
+                if (selectedFlatItem?.type === 'message' && client) {
+                  const channelData = state.expandedChannelData.get(selectedFlatItem.channelId)
+                  const msg = channelData?.messages[selectedFlatItem.messageIndex]
+                  const currentUser = client.getCurrentUser()
+                  if (msg && currentUser && msg.authorId === currentUser.id) {
+                    dispatch({ type: 'SET_STATUS', text: '🗑️  Deleting message...' })
+                    void (async () => {
+                      try {
+                        await client.deleteMessage(selectedFlatItem.channelId, msg.id)
+                        // Clear from cache immediately
+                        deleteCachedMessage(client.type, selectedFlatItem.channelId, msg.id)
+                        dispatch({ type: 'SET_STATUS', text: '✅ Message deleted' })
+                        // Refresh channel messages from cache
+                        const channel = state.channels.find(c => c.id === selectedFlatItem.channelId)
+                        if (channel) {
+                          const cached = getCachedMessages(client.type, channel.id)
+                          if (cached) {
+                            dispatch({
+                              type: 'SET_EXPANDED_CHANNEL_DATA',
+                              channelId: channel.id,
+                              data: {
+                                channelId: channel.id,
+                                messages: cached.messages,
+                                isLoading: false,
+                                hasMoreOlderMessages: true,
+                              },
+                            })
+                          }
+                        }
+                      } catch (err) {
+                        dispatch({
+                          type: 'SET_STATUS',
+                          text: `❌ Error: ${err instanceof Error ? err.message : 'Unknown'}`,
+                        })
+                      }
+                    })()
+                  } else if (msg && currentUser && msg.authorId !== currentUser.id) {
+                    dispatch({ type: 'SET_STATUS', text: '❌ Can only delete your own messages' })
+                  }
+                }
+                return
+              }
+              if (input === 'r' || input === 'R') {
+                // Reply to message
+                if (selectedFlatItem?.type === 'message') {
+                  const channelData = state.expandedChannelData.get(selectedFlatItem.channelId)
+                  const msg = channelData?.messages[selectedFlatItem.messageIndex]
+                  if (msg) {
+                    dispatch({ type: 'SET_REPLYING_TO', messageId: msg.id })
+                    const channel = state.channels.find(c => c.id === selectedFlatItem.channelId)
+                    if (channel) {
+                      dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+                    }
+                    const inputIdx = findInputIndexForChannel(state.flatItems, selectedFlatItem.channelId)
+                    if (inputIdx !== -1) {
+                      dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIdx })
+                    }
+                    dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+                  }
+                }
+                return
+              }
+              if (input === 'e') {
+                // React to message
+                if (selectedFlatItem?.type === 'message' && client) {
+                  const channelData = state.expandedChannelData.get(selectedFlatItem.channelId)
+                  const msg = channelData?.messages[selectedFlatItem.messageIndex]
+                  if (msg) {
+                    const channel = state.channels.find(c => c.id === selectedFlatItem.channelId)
+                    if (channel) {
+                      dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+                    }
+                    dispatch({ type: 'SET_REACTING_TO', messageId: msg.id })
+                    const inputIdx = findInputIndexForChannel(state.flatItems, selectedFlatItem.channelId)
+                    if (inputIdx !== -1) {
+                      dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIdx })
+                    }
+                    dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+                    dispatch({ type: 'SET_STATUS', text: 'Enter emoji to react (e.g., 👍 or :thumbsup:)' })
+                  }
+                }
+                return
+              }
+              if (input === 't') {
+                // Edit message
+                if (selectedFlatItem?.type === 'message' && client) {
+                  const channelData = state.expandedChannelData.get(selectedFlatItem.channelId)
+                  const msg = channelData?.messages[selectedFlatItem.messageIndex]
+                  const currentUser = client.getCurrentUser()
+                  if (msg && currentUser && msg.authorId === currentUser.id) {
+                    const channel = state.channels.find(c => c.id === selectedFlatItem.channelId)
+                    if (channel) {
+                      dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+                    }
+                    dispatch({
+                      type: 'SET_EDITING',
+                      messageId: msg.id,
+                      channelId: selectedFlatItem.channelId,
+                      originalContent: msg.content
+                    })
+                    const inputIdx = findInputIndexForChannel(state.flatItems, selectedFlatItem.channelId)
+                    if (inputIdx !== -1) {
+                      dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIdx })
+                    }
+                    dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+                  } else if (msg && currentUser && msg.authorId !== currentUser.id) {
+                    dispatch({ type: 'SET_STATUS', text: '❌ Can only edit your own messages' })
                   }
                 }
                 return
@@ -2146,7 +2430,14 @@ export function App({
               }
               if (input === 'o' && selectedMsg) {
                 const urls = extractUrls(selectedMsg.content)
-                if (urls.length > 0) openUrlInBrowser(urls[0])
+                if (urls.length === 0) {
+                  dispatch({ type: 'SET_STATUS', text: 'No URLs in this message' })
+                } else {
+                  for (const url of urls) {
+                    openUrlInBrowser(url)
+                  }
+                  dispatch({ type: 'SET_STATUS', text: `Opened ${urls.length} URL${urls.length > 1 ? 's' : ''}` })
+                }
                 return
               }
               if (input === 'v' && selectedMsg) {
@@ -2156,6 +2447,133 @@ export function App({
                   content: selectedMsg.content,
                   reactions: Array.isArray(selectedMsg.reactions) && selectedMsg.reactions.length > 0 ? selectedMsg.reactions : undefined
                 }})
+                return
+              }
+              if (input === 'd' && selectedMsg && client) {
+                // Delete message in reader mode
+                const currentUser = client.getCurrentUser()
+                if (currentUser && selectedMsg.authorId === currentUser.id) {
+                  dispatch({ type: 'SET_STATUS', text: '🗑️  Deleting message...' })
+                  void (async () => {
+                    try {
+                      await client.deleteMessage(state.readerFocusChannel!, selectedMsg.id)
+                      // Clear from cache immediately
+                      deleteCachedMessage(client.type, state.readerFocusChannel!, selectedMsg.id)
+                      dispatch({ type: 'SET_STATUS', text: '✅ Message deleted' })
+                      // Refresh channel messages from cache
+                      const channel = state.channels.find(c => c.id === state.readerFocusChannel)
+                      if (channel) {
+                        const cached = getCachedMessages(client.type, channel.id)
+                        if (cached) {
+                          dispatch({
+                            type: 'SET_EXPANDED_CHANNEL_DATA',
+                            channelId: channel.id,
+                            data: {
+                              channelId: channel.id,
+                              messages: cached.messages,
+                              isLoading: false,
+                              hasMoreOlderMessages: true,
+                            },
+                          })
+                        }
+                      }
+                    } catch (err) {
+                      dispatch({
+                        type: 'SET_STATUS',
+                        text: `❌ Error: ${err instanceof Error ? err.message : 'Unknown'}`,
+                      })
+                    }
+                  })()
+                } else if (currentUser && selectedMsg.authorId !== currentUser.id) {
+                  dispatch({ type: 'SET_STATUS', text: '❌ Can only delete your own messages' })
+                }
+                return
+              }
+              if ((input === 'r' || input === 'R') && selectedMsg) {
+                // Reply to message in reader mode
+                dispatch({ type: 'SET_REPLYING_TO', messageId: selectedMsg.id })
+                const channel = state.channels.find(c => c.id === state.readerFocusChannel)
+                if (channel) {
+                  dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+                }
+                const inputIdx = findInputIndexForChannel(state.flatItems, state.readerFocusChannel!)
+                if (inputIdx !== -1) {
+                  dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIdx })
+                }
+                dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+                dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+                return
+              }
+              if (input === 'e' && selectedMsg && client) {
+                // React to message in reader mode
+                const channel = state.channels.find(c => c.id === state.readerFocusChannel)
+                if (channel) {
+                  dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+                }
+                dispatch({ type: 'SET_REACTING_TO', messageId: selectedMsg.id })
+                const inputIdx = findInputIndexForChannel(state.flatItems, state.readerFocusChannel!)
+                if (inputIdx !== -1) {
+                  dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIdx })
+                }
+                dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+                dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+                dispatch({ type: 'SET_STATUS', text: 'Enter emoji to react (e.g., 👍 or :thumbsup:)' })
+                return
+              }
+              if (input === 't' && selectedMsg && client) {
+                // Edit message in reader mode
+                const currentUser = client.getCurrentUser()
+                if (currentUser && selectedMsg.authorId === currentUser.id) {
+                  const channel = state.channels.find(c => c.id === state.readerFocusChannel)
+                  if (channel) {
+                    dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+                  }
+                  dispatch({
+                    type: 'SET_EDITING',
+                    messageId: selectedMsg.id,
+                    channelId: state.readerFocusChannel,
+                    originalContent: selectedMsg.content
+                  })
+                  const inputIdx = findInputIndexForChannel(state.flatItems, state.readerFocusChannel!)
+                  if (inputIdx !== -1) {
+                    dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIdx })
+                  }
+                  dispatch({ type: 'SET_READER_FOCUS', channelId: null })
+                  dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+                } else if (currentUser && selectedMsg.authorId !== currentUser.id) {
+                  dispatch({ type: 'SET_STATUS', text: '❌ Can only edit your own messages' })
+                }
+                return
+              }
+              if (input === 'k') {
+                // Mark channel as read in reader mode
+                if (state.readerFocusChannel) {
+                  markChannelVisited(state.readerFocusChannel, undefined, client?.type || 'discord')
+                  if (onRefreshChannels) {
+                    void onRefreshChannels().then(({ channels, displayItems }) => {
+                      dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+                    })
+                  }
+                }
+                return
+              }
+              if (input === 'f') {
+                // Follow/unfollow channel in reader mode
+                const channel = state.channels.find(c => c.id === state.readerFocusChannel)
+                if (channel?.isFollowing && onUnfollowChannel) {
+                  void onUnfollowChannel(channel).then(({ channels, displayItems }) => {
+                    dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+                  })
+                } else if (channel && onFollowChannel) {
+                  void onFollowChannel(channel).then(({ channels, displayItems }) => {
+                    dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+                  })
+                }
+                return
+              }
+              if (input === 'j') {
+                // Exit reader mode (same as Esc but more explicit)
+                dispatch({ type: 'SET_READER_FOCUS', channelId: null })
                 return
               }
               if (input === 'q') {
@@ -2186,8 +2604,6 @@ export function App({
               return
             }
             break
-          case 'react':
-            break // Handled by SimpleTextInput
         }
       },
       [state, exit, sendMessage, refreshAllChannels, onFollowChannel, onUnfollowChannel, onToggleSection, title, client?.type, addReaction]
@@ -2207,29 +2623,36 @@ export function App({
         ...commonHelpBindings,
         { key: 'Enter/Tab', label: 'expand' },
         { key: 'i', label: 'compose' },
-        { key: 'f', label: 'follow/unfollow' },
-        { key: 'j', label: 'reader mode' },
+        { key: 'd', label: 'delete' },
+        { key: 'r', label: 'reply' },
+        { key: 'e', label: 'react' },
+        { key: 't', label: 'edit' },
+        { key: 'v', label: 'view' },
         { key: 'o', label: 'open URL' },
-        { key: 'k', label: 'mark read' },
-        { key: 'v', label: 'view message' }
+        { key: 'a', label: 'download' },
+        { key: 'F', label: 'follow/unfollow' },
+        { key: 'j', label: 'reader mode' },
+        { key: 'k', label: 'mark read' }
       ]
     } else if (state.focusMode === 'compose') {
-      helpBindings = [{ key: 'Enter', label: 'send' }, { key: 'Esc', label: 'cancel' }]
+      const actionLabel = state.editingMessageId ? 'save edit' : 'send'
+      helpBindings = [{ key: 'Enter', label: actionLabel }, { key: 'Esc', label: 'cancel' }]
     } else if (state.focusMode === 'reader') {
       helpBindings = [
-        { key: '↑↓', label: 'scroll msg' },
-        { key: 'hjkl', label: 'nav channel' }, // Added for clarity
-        { key: 'Esc', label: 'exit reader' },
-        { key: 'r', label: 'react' },
+        { key: '↑↓', label: 'scroll' },
+        { key: 'hl', label: 'prev/next channel' },
         { key: 'd', label: 'delete' },
-        { key: 'R', label: 'reply' },
-        { key: 'v', label: 'view message' },
+        { key: 'r', label: 'reply' },
+        { key: 'e', label: 'react' },
+        { key: 't', label: 'edit' },
+        { key: 'v', label: 'view' },
         { key: 'o', label: 'open URL' },
-        { key: 'a', label: 'download attachments' },
+        { key: 'a', label: 'download' },
+        { key: 'F', label: 'follow/unfollow' },
+        { key: 'j', label: 'exit reader' },
+        { key: 'k', label: 'mark read' },
       ]
     }
-  } else if (state.view === 'react') {
-    helpBindings = [{ key: 'Enter', label: 'send reaction' }, { key: 'Esc', label: 'cancel' }]
   } else if (state.view === 'llmReview') {
     helpBindings = [{ key: 'o', label: 'send original' }, { key: 'p', label: 'send processed' }, { key: 'e', label: 'edit processed' }, { key: 'O', label: 'edit original' }, { key: 'Esc', label: 'cancel' }]
   }
@@ -2260,21 +2683,12 @@ export function App({
             }
             onSubmitUnified={sendMessage}
             replyingToMessageId={state.replyingToMessageId}
+            reactingToMessageId={state.reactingToMessageId}
+            editingMessageId={state.editingMessageId}
             rows={state.rows}
             cols={state.cols}
             viewportOffset={state.viewportOffset}
             getChannelFromDisplayIndex={getChannelFromDisplayIndex}
-          />
-        )}
-        {state.view === 'react' && (
-          <ReactView
-            inputText={state.inputText}
-            cursorPos={state.inputCursorPos}
-            onInputChange={(text) => dispatch({ type: 'SET_INPUT_TEXT', text })}
-            onCursorChange={(pos) =>
-              dispatch({ type: 'SET_INPUT_CURSOR_POS', pos })
-            }
-            onSubmit={addReaction}
           />
         )}
         {state.view === 'llmReview' && (

@@ -333,6 +333,20 @@ export class DiscordPlatformClient implements IPlatformClient {
     await message.delete()
   }
 
+  async editMessage(channelId: string, messageId: string, newContent: string): Promise<void> {
+    const channel = await this.client.channels.fetch(channelId)
+    if (!channel || !channel.isTextBased()) {
+      throw new Error('Channel not found or not text-based')
+    }
+
+    if (!(channel instanceof TextChannel || channel instanceof ThreadChannel || channel instanceof DMChannel)) {
+      throw new Error('Invalid channel type')
+    }
+
+    const message = await channel.messages.fetch(messageId)
+    await message.edit(newContent)
+  }
+
   async getReactionUsers(
     channelId: string,
     messageId: string,

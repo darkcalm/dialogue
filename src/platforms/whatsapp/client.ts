@@ -583,6 +583,25 @@ export class WhatsAppPlatformClient implements IPlatformClient {
     }
   }
 
+  async editMessage(channelId: string, messageId: string, newContent: string): Promise<void> {
+    if (!this.sock) {
+      throw new Error('Not connected to WhatsApp')
+    }
+
+    try {
+      await this.sock.sendMessage(channelId, {
+        edit: {
+          remoteJid: channelId,
+          id: messageId,
+          text: newContent,
+        },
+      })
+    } catch (error) {
+      console.error('Error editing WhatsApp message:', error)
+      throw error
+    }
+  }
+
   async getReactionUsers(
     channelId: string,
     messageId: string,

@@ -191,6 +191,11 @@ export interface IPlatformClient {
   deleteMessage(channelId: string, messageId: string): Promise<void>
 
   /**
+   * Edit a message (if supported and authorized)
+   */
+  editMessage(channelId: string, messageId: string, newContent: string): Promise<void>
+
+  /**
    * Get users who reacted with a specific emoji
    */
   getReactionUsers(
