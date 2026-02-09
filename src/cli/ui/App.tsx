@@ -842,7 +842,7 @@ function MessageDetailView({ message }: MessageDetailViewProps) {
          ))}
        </Box>
        {message.reactions && message.reactions.length > 0 && (
-         <Box flexDirection="column" marginTop={1}>
+         <Box flexDirection="column">
           <Text color="yellow" bold>Reactions:</Text>
           {message.reactions.map((r, i) => (
             <Text key={i}>  {r.emoji} {r.count} — {r.users.length > 0 ? r.users.join(', ') : 'unknown'}</Text>

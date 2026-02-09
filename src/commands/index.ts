@@ -1,1 +1,1 @@
-export * as links from '@/commands/links'
+export {}
