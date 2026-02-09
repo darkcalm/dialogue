@@ -3,9 +3,8 @@
  * Single-column layout with view switching
  */
 
-import React, { useReducer, useCallback, useEffect, useState, useRef } from 'react'
+import React, { useReducer, useCallback, useEffect, useState } from 'react'
 import { render, Box, Text, useApp, useInput, useStdout } from 'ink'
-import { execSync } from 'child_process'
 import { IPlatformClient } from '@/platforms/types'
 import type { SectionName } from '../inbox'
 import {
@@ -1207,11 +1206,19 @@ export function App({
     }
   }, [stdout])
 
-  // Enable mouse click to move focus + double-click to copy
-  const lastClickRef = useRef<{ flatIndex: number; time: number }>({ flatIndex: -1, time: 0 })
+  // Enable mouse click to move focus (disabled when message detail is open for text selection)
   useEffect(() => {
     const stdin = process.stdin
     if (!stdin.setRawMode) return
+
+    if (state.messageDetail) {
+      process.stdout.write('\x1b[?1006l')
+      process.stdout.write('\x1b[?1000l')
+      return () => {
+        process.stdout.write('\x1b[?1000h')
+        process.stdout.write('\x1b[?1006h')
+      }
+    }
 
     process.stdout.write('\x1b[?1000h')
     process.stdout.write('\x1b[?1006h')
@@ -1227,28 +1234,7 @@ export function App({
       if (button === 0 && isRelease) {
         const flatIndex = (y - 2) + state.viewportOffset
         if (flatIndex >= 0 && flatIndex < state.flatItems.length) {
-          const now = Date.now()
-          const last = lastClickRef.current
-
-          if (last.flatIndex === flatIndex && now - last.time < 400) {
-            const item = state.flatItems[flatIndex]
-            if (item.type === 'message') {
-              const channelData = state.expandedChannelData.get(item.channelId)
-              const msg = channelData?.messages[item.messageIndex]
-              if (msg) {
-                try {
-                  execSync('pbcopy', { input: msg.content })
-                  dispatch({ type: 'SET_STATUS', text: '📋 Message copied to clipboard' })
-                } catch {
-                  dispatch({ type: 'SET_STATUS', text: '❌ Failed to copy' })
-                }
-              }
-            }
-            lastClickRef.current = { flatIndex: -1, time: 0 }
-          } else {
-            lastClickRef.current = { flatIndex, time: now }
-            dispatch({ type: 'SELECT_FLAT_INDEX', index: flatIndex })
-          }
+          dispatch({ type: 'SELECT_FLAT_INDEX', index: flatIndex })
         }
       }
     }
@@ -1259,7 +1245,7 @@ export function App({
       process.stdout.write('\x1b[?1006l')
       process.stdout.write('\x1b[?1000l')
     }
-  }, [state.flatItems, state.viewportOffset, state.expandedChannelData])
+  }, [state.flatItems.length, state.viewportOffset, state.messageDetail])
 
   // Rebuild flat items when channels, expanded state, or data changes
   useEffect(() => {
