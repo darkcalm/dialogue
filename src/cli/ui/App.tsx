@@ -313,8 +313,8 @@ function reducer(state: AppState, action: Action): AppState {
       const data = state.expandedChannelData.get(action.channelId)
       const totalMsgs = data?.messages.length || 0
       if (!newOffsets.has(action.channelId)) {
-        // Default to showing the most recent messages
-        newOffsets.set(action.channelId, Math.max(0, totalMsgs - DEFAULT_VISIBLE_MESSAGES))
+        // Default to showing the most recent messages (start from index 0)
+        newOffsets.set(action.channelId, 0)
       }
       // Default to selecting the last visible message (most recent)
       const visibleCount = Math.min(DEFAULT_VISIBLE_MESSAGES, totalMsgs)
@@ -432,12 +432,12 @@ function buildFlatItems(
               startIdx = offset
               endIdx = Math.min(offset + DEFAULT_VISIBLE_MESSAGES, data.messages.length)
             } else {
-              // Default: show last 5 messages
-              startIdx = Math.max(0, data.messages.length - DEFAULT_VISIBLE_MESSAGES)
-              endIdx = data.messages.length
+              // Default: show newest 5 messages
+              startIdx = 0
+              endIdx = Math.min(DEFAULT_VISIBLE_MESSAGES, data.messages.length)
             }
 
-            for (let msgIdx = startIdx; msgIdx < endIdx; msgIdx++) {
+            for (let msgIdx = endIdx - 1; msgIdx >= startIdx; msgIdx--) {
               const msg = data.messages[msgIdx]
               items.push({
                 type: 'message',
@@ -966,7 +966,8 @@ function UnifiedView({
             const isNavSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
             const isReaderChannel = readerFocusChannel === channel.id
             const readerOffset = channelMessageOffsets.get(channel.id) || 0
-            const isReaderSelected = isReaderChannel && currentItem.messageIndex === readerOffset + readerSelectedMessageOffset
+            const endIdx = Math.min(readerOffset + DEFAULT_VISIBLE_MESSAGES, data.messages.length)
+            const isReaderSelected = isReaderChannel && currentItem.messageIndex === (endIdx - 1) - readerSelectedMessageOffset
             const isSelected = isNavSelected || isReaderSelected
             const msg = data.messages[currentItem.messageIndex]
             if (msg) {
@@ -2093,8 +2094,8 @@ export function App({
                 if (state.readerSelectedMessageOffset > 0) {
                   dispatch({ type: 'SET_READER_SELECTED_MESSAGE_OFFSET', offset: state.readerSelectedMessageOffset - 1 })
                 } else {
-                  // Try to scroll the channel's message window up
-                  dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId: state.readerFocusChannel, delta: -1 })
+                  // Try to scroll the channel's message window up (show older messages)
+                  dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId: state.readerFocusChannel, delta: 1 })
                 }
                 return
               }
@@ -2103,8 +2104,8 @@ export function App({
                 if (state.readerSelectedMessageOffset < visibleCount - 1) {
                   dispatch({ type: 'SET_READER_SELECTED_MESSAGE_OFFSET', offset: state.readerSelectedMessageOffset + 1 })
                 } else {
-                  // Try to scroll the channel's message window down
-                  dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId: state.readerFocusChannel, delta: 1 })
+                  // Try to scroll the channel's message window down (show newer messages)
+                  dispatch({ type: 'SCROLL_CHANNEL_MESSAGES', channelId: state.readerFocusChannel, delta: -1 })
                 }
                 return
               }
@@ -2125,7 +2126,8 @@ export function App({
                 return
               }
               const readerOffset = state.channelMessageOffsets.get(state.readerFocusChannel) || 0
-              const selectedMsg = channelData.messages[readerOffset + state.readerSelectedMessageOffset]
+              const endIdx = Math.min(readerOffset + DEFAULT_VISIBLE_MESSAGES, channelData.messages.length)
+              const selectedMsg = channelData.messages[(endIdx - 1) - state.readerSelectedMessageOffset]
 
               if (input === 'a' && selectedMsg) {
                 if (!selectedMsg.hasAttachments || selectedMsg.attachments.length === 0) {
