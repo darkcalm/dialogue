@@ -231,9 +231,15 @@ async function main(): Promise<void> {
     fs.writeFileSync(REALTIME_LOG_FILE, '')
   } catch {}
 
-  log('Initializing databases...')
+  log('Initializing databases (clean start)...')
   localDb = getClient('realtime', 'local')
   remoteDb = getClient('realtime', 'remote')
+  for (const db of [localDb, remoteDb]) {
+    if (!db) continue
+    await db.execute('DROP TABLE IF EXISTS messages')
+    await db.execute('DROP TABLE IF EXISTS channel_events')
+    await db.execute('DROP TABLE IF EXISTS channels')
+  }
   await initDB(localDb)
   await initDB(remoteDb)
   log('Databases initialized.')

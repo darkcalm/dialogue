@@ -23,26 +23,25 @@ fi
 
 echo "--- Starting services... ---"
 
-# Start the realtime service in the background
+# Start the realtime service in the background, detached from terminal
 echo "Starting realtime service in the background..."
-npm run realtime &
+nohup npm run realtime > /tmp/dialogue-realtime.log 2>&1 &
 REALTIME_PID=$!
-echo "Realtime service started with PID: $REALTIME_PID"
+disown "$REALTIME_PID"
+echo "Realtime service started with PID: $REALTIME_PID (detached)"
+echo "Logs: /tmp/dialogue-realtime.log"
 
 # Give it a moment to initialize
 sleep 2
 
-# Start the archive service in the foreground
-echo "Starting archive (frontfill) service in the foreground..."
-npm run archive
+# Start the archive service in the background, detached from terminal
+echo "Starting archive service in the background..."
+nohup npm run archive > /tmp/dialogue-archive.log 2>&1 &
+ARCHIVE_PID=$!
+disown "$ARCHIVE_PID"
+echo "Archive service started with PID: $ARCHIVE_PID (detached)"
+echo "Logs: /tmp/dialogue-archive.log"
 
-# After archive finishes, keep the realtime service running
-echo "Archive service finished. Realtime service continues running..."
-echo "Realtime service PID: $REALTIME_PID"
-echo "To stop the realtime service, run: kill $REALTIME_PID"
-
-# Wait for the realtime service to finish (it should run indefinitely)
-echo "--- Waiting for realtime service... (Press Ctrl+C to stop) ---"
-wait "$REALTIME_PID"
-
-echo "--- Realtime service stopped. ---"
+echo "--- Done. Both services running in the background. ---"
+echo "Realtime PID: $REALTIME_PID | Archive PID: $ARCHIVE_PID"
+echo "Re-run this script to stop and restart both."
