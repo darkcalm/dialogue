@@ -22,6 +22,9 @@ import {
   resolveEmoji,
   emojify,
   LLMContext,
+  copyToClipboard,
+  generateDiscordChannelLink,
+  generateDiscordMessageLink,
 } from '../shared'
 import { upsertCachedMessage, deleteCachedMessage, getCachedMessages } from '../cache'
 
@@ -2363,6 +2366,33 @@ export function App({
                 }
                 return
               }
+              if (input === 'c') {
+                // Copy Discord link for selected message or channel
+                if (selectedFlatItem?.type === 'message') {
+                  const channelData = state.expandedChannelData.get(selectedFlatItem.channelId)
+                  const msg = channelData?.messages[selectedFlatItem.messageIndex]
+                  const channel = state.channels.find(c => c.id === selectedFlatItem.channelId)
+                  if (msg && channel) {
+                    const link = generateDiscordMessageLink(channel.id, msg.id, channel.guildId)
+                    void copyToClipboard(link).then(() => {
+                      dispatch({ type: 'SET_STATUS', text: `📋 Copied message link: ${link}` })
+                    }).catch((err) => {
+                      dispatch({ type: 'SET_STATUS', text: `❌ Failed to copy: ${err instanceof Error ? err.message : 'Unknown error'}` })
+                    })
+                  }
+                } else if (selectedFlatItem?.type === 'channel') {
+                  const channel = state.channels.find(c => c.id === selectedFlatItem.channelId)
+                  if (channel) {
+                    const link = generateDiscordChannelLink(channel.id, channel.guildId)
+                    void copyToClipboard(link).then(() => {
+                      dispatch({ type: 'SET_STATUS', text: `📋 Copied channel link: ${link}` })
+                    }).catch((err) => {
+                      dispatch({ type: 'SET_STATUS', text: `❌ Failed to copy: ${err instanceof Error ? err.message : 'Unknown error'}` })
+                    })
+                  }
+                }
+                return
+              }
             }
             // --- Compose mode (handled by SimpleTextInput) ---
             // --- Reader mode ---
@@ -2557,6 +2587,21 @@ export function App({
                 }
                 return
               }
+              if (input === 'c') {
+                // Copy Discord link for selected message in reader mode
+                if (selectedMsg && state.readerFocusChannel) {
+                  const channel = state.channels.find(c => c.id === state.readerFocusChannel)
+                  if (channel) {
+                    const link = generateDiscordMessageLink(channel.id, selectedMsg.id, channel.guildId)
+                    void copyToClipboard(link).then(() => {
+                      dispatch({ type: 'SET_STATUS', text: `📋 Copied message link: ${link}` })
+                    }).catch((err) => {
+                      dispatch({ type: 'SET_STATUS', text: `❌ Failed to copy: ${err instanceof Error ? err.message : 'Unknown error'}` })
+                    })
+                  }
+                }
+                return
+              }
               if (input === 'f') {
                 // Follow/unfollow channel in reader mode
                 const channel = state.channels.find(c => c.id === state.readerFocusChannel)
@@ -2630,6 +2675,7 @@ export function App({
         { key: 'v', label: 'view' },
         { key: 'o', label: 'open URL' },
         { key: 'a', label: 'download' },
+        { key: 'c', label: 'copy link' },
         { key: 'F', label: 'follow/unfollow' },
         { key: 'j', label: 'reader mode' },
         { key: 'k', label: 'mark read' }
@@ -2648,6 +2694,7 @@ export function App({
         { key: 'v', label: 'view' },
         { key: 'o', label: 'open URL' },
         { key: 'a', label: 'download' },
+        { key: 'c', label: 'copy link' },
         { key: 'F', label: 'follow/unfollow' },
         { key: 'j', label: 'exit reader' },
         { key: 'k', label: 'mark read' },

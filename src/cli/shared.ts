@@ -84,6 +84,7 @@ export interface ChannelInfo {
   name: string
   type: string
   guildName?: string
+  guildId?: string
 }
 
 export interface ReplyInfo {
@@ -984,6 +985,71 @@ export const downloadAttachmentsFromInfo = async (
 
   await Promise.all(downloadPromises)
   statusCallback(`✅ Downloaded ${attachments.length} file(s) to Downloads folder`)
+}
+
+// ==================== Discord Link Generation ====================
+
+/**
+ * Generate a Discord link for a channel
+ * @param channelId The channel ID
+ * @param guildId The guild ID (optional, for DMs use null or undefined)
+ * @returns Discord channel URL
+ */
+export const generateDiscordChannelLink = (channelId: string, guildId?: string | null): string => {
+  const guild = guildId || '@me'
+  return `https://discord.com/channels/${guild}/${channelId}`
+}
+
+/**
+ * Generate a Discord link for a message
+ * @param channelId The channel ID
+ * @param messageId The message ID
+ * @param guildId The guild ID (optional, for DMs use null or undefined)
+ * @returns Discord message URL
+ */
+export const generateDiscordMessageLink = (
+  channelId: string,
+  messageId: string,
+  guildId?: string | null
+): string => {
+  const guild = guildId || '@me'
+  return `https://discord.com/channels/${guild}/${channelId}/${messageId}`
+}
+
+// ==================== Clipboard Operations ====================
+
+/**
+ * Copy text to system clipboard
+ * @param text The text to copy
+ * @returns Promise that resolves when copy is complete
+ */
+export const copyToClipboard = async (text: string): Promise<void> => {
+  const platform = os.platform()
+  let command: string
+
+  if (platform === 'darwin') {
+    command = 'pbcopy'
+  } else if (platform === 'win32') {
+    command = 'clip'
+  } else {
+    // Linux - try xclip first, fall back to xsel
+    command = 'xclip -selection clipboard'
+  }
+
+  return new Promise((resolve, reject) => {
+    const proc = exec(command, (error) => {
+      if (error) {
+        reject(error)
+      } else {
+        resolve()
+      }
+    })
+
+    if (proc.stdin) {
+      proc.stdin.write(text)
+      proc.stdin.end()
+    }
+  })
 }
 
 // ==================== Emoji Resolution for Reactions ====================

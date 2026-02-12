@@ -110,6 +110,7 @@ async function buildInbox(
       name: channel.name,
       type: (channel.type as 'text' | 'thread' | 'dm') || 'text',
       guildName: channel.guildName,
+      guildId: channel.guildId,
       group: 'following',
     }
     
