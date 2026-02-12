@@ -16,6 +16,7 @@ import {
   getClient,
   saveChannels,
   saveMessages,
+  recordMessageEvent,
   getOldestMessageId,
   getChannelStats,
   messageExists,
@@ -229,6 +230,74 @@ async function syncToRemote(localDb: Client, remoteDb: Client) {
     log('✅ Incremental sync complete.')
 }
 
+// Helper functions for dual-write to local and remote archive DBs
+async function dualWriteSaveMessages(records: MessageRecord[]) {
+  if (localDb) await saveMessages(localDb, records).catch(err => log(`⚠️ Local archive DB save failed: ${err.message}`))
+  if (remoteDb) await saveMessages(remoteDb, records).catch(err => log(`⚠️ Remote archive DB save failed: ${err.message}`))
+}
+
+async function dualWriteSaveChannels(records: ChannelRecord[]) {
+  if (localDb) await saveChannels(localDb, records).catch(err => log(`⚠️ Local archive DB channel save failed: ${err.message}`))
+  if (remoteDb) await saveChannels(remoteDb, records).catch(err => log(`⚠️ Remote archive DB channel save failed: ${err.message}`))
+}
+
+async function dualWriteRecordDeleteEvent(messageId: string) {
+  if (localDb) await recordMessageEvent(localDb, messageId, 'delete').catch(err => log(`⚠️ Local archive DB record delete event failed: ${err.message}`))
+  if (remoteDb) await recordMessageEvent(remoteDb, messageId, 'delete').catch(err => log(`⚠️ Remote archive DB record delete event failed: ${err.message}`))
+}
+
+async function channelExists(channelId: string): Promise<boolean> {
+  const db = localDb || remoteDb
+  if (!db) return false
+  const result = await db.execute({ sql: `SELECT 1 FROM channels WHERE id = ? LIMIT 1`, args: [channelId] })
+  return result.rows.length > 0
+}
+
+/**
+ * Set up event listeners for ongoing archive updates
+ */
+function setupArchiveEventHandlers(client: DiscordPlatformClient): void {
+  client.onMessage(async (message: IPlatformMessage) => {
+    try {
+      if (!(await channelExists(message.channelId))) {
+        const channelInfo = await client.getChannel(message.channelId)
+        if (channelInfo) {
+          await dualWriteSaveChannels([channelToRecord(channelInfo)])
+          log(`Discovered new channel #${channelInfo.name}`)
+        }
+      }
+      await dualWriteSaveMessages([messageToRecord(message)])
+      log(`Archived new message from ${message.author} in channel ${message.channelId}`)
+    } catch (error) {
+      log(`Failed to archive message ${message.id}: ${error instanceof Error ? error.message : 'Unknown'}`)
+    }
+  })
+
+  client.onMessageUpdate(async (message: IPlatformMessage) => {
+    try {
+      if (!(await channelExists(message.channelId))) {
+        const channelInfo = await client.getChannel(message.channelId)
+        if (channelInfo) {
+          await dualWriteSaveChannels([channelToRecord(channelInfo)])
+        }
+      }
+      await dualWriteSaveMessages([messageToRecord(message)])
+      log(`Archived message update ${message.id}`)
+    } catch (error) {
+      log(`Failed to archive message update ${message.id}: ${error instanceof Error ? error.message : 'Unknown'}`)
+    }
+  })
+
+  client.onMessageDelete(async (channelId: string, messageId: string) => {
+    try {
+      await dualWriteRecordDeleteEvent(messageId)
+      log(`Recorded delete event for message ${messageId} in archive`)
+    } catch (error) {
+      log(`Failed to record delete event for message ${messageId}: ${error instanceof Error ? error.message : 'Unknown'}`)
+    }
+  })
+}
+
 
 async function main(): Promise<void> {
   log('\nDiscord Archive Service - Frontfill\n')
@@ -242,6 +311,7 @@ async function main(): Promise<void> {
   remoteDb = getClient('archive', 'remote')
 
   log('Clearing local archive database for fresh frontfill...')
+  await localDb.execute('DROP TABLE IF EXISTS message_events')
   await localDb.execute('DROP TABLE IF EXISTS messages')
   await localDb.execute('DROP TABLE IF EXISTS channel_events')
   await localDb.execute('DROP TABLE IF EXISTS channels')
@@ -279,7 +349,13 @@ async function main(): Promise<void> {
     }
 
     log('Frontfill and sync process complete.')
-    shutdown()
+    log('Setting up real-time archive event handlers...')
+    setupArchiveEventHandlers(discordClient)
+    log('Archive service now listening for real-time updates...')
+    log('Press Ctrl+C to stop.')
+
+    // Keep the service running
+    await new Promise(() => {})
 
   } catch (error) {
     console.error('Fatal error:', error instanceof Error ? error.message : 'Unknown error')

@@ -16,10 +16,7 @@ import {
   getClient,
   saveChannels,
   saveMessages,
-  // These will need to be re-implemented with dual-write logic
-  // deleteMessage,
-  // channelExists,
-  // ensureChannelExists,
+  recordMessageEvent,
   ChannelRecord,
   MessageRecord,
 } from './db'
@@ -133,10 +130,9 @@ async function dualWriteSaveChannels(records: ChannelRecord[]) {
   if (remoteDb) await saveChannels(remoteDb, records).catch(err => log(`⚠️ Remote DB channel save failed: ${err.message}`))
 }
 
-async function dualWriteDeleteMessage(messageId: string) {
-  const statement = { sql: `DELETE FROM messages WHERE id = ?`, args: [messageId] }
-  if (localDb) await localDb.execute(statement).catch(err => log(`⚠️ Local DB delete failed: ${err.message}`))
-  if (remoteDb) await remoteDb.execute(statement).catch(err => log(`⚠️ Remote DB delete failed: ${err.message}`))
+async function dualWriteRecordDeleteEvent(messageId: string) {
+  if (localDb) await recordMessageEvent(localDb, messageId, 'delete').catch(err => log(`⚠️ Local DB record delete event failed: ${err.message}`))
+  if (remoteDb) await recordMessageEvent(remoteDb, messageId, 'delete').catch(err => log(`⚠️ Remote DB record delete event failed: ${err.message}`))
 }
 
 async function channelExists(channelId: string): Promise<boolean> {
@@ -184,10 +180,10 @@ function setupRealtimeHandlers(client: DiscordPlatformClient): void {
 
   client.onMessageDelete(async (channelId: string, messageId: string) => {
     try {
-      await dualWriteDeleteMessage(messageId)
-      log(`Deleted message ${messageId} from channel ${channelId}`)
+      await dualWriteRecordDeleteEvent(messageId)
+      log(`Recorded delete event for message ${messageId} in channel ${channelId}`)
     } catch (error) {
-      log(`Failed to delete message ${messageId}: ${error instanceof Error ? error.message : 'Unknown'}`)
+      log(`Failed to record delete event for message ${messageId}: ${error instanceof Error ? error.message : 'Unknown'}`)
     }
   })
 }
@@ -236,6 +232,7 @@ async function main(): Promise<void> {
   remoteDb = getClient('realtime', 'remote')
   for (const db of [localDb, remoteDb]) {
     if (!db) continue
+    await db.execute('DROP TABLE IF EXISTS message_events')
     await db.execute('DROP TABLE IF EXISTS messages')
     await db.execute('DROP TABLE IF EXISTS channel_events')
     await db.execute('DROP TABLE IF EXISTS channels')

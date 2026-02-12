@@ -120,9 +120,21 @@ export async function initDB(db: Client): Promise<void> {
     )
   `)
 
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS message_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      FOREIGN KEY (message_id) REFERENCES messages(id)
+    )
+  `)
+
   // Create indexes
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id)`)
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)`)
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_message_events_message ON message_events(message_id)`)
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_message_events_type ON message_events(event_type)`)
 }
 
 // Data record types
@@ -366,22 +378,33 @@ export async function getChannels(db: Client): Promise<ChannelRecord[]> {
 
 export async function getMessages(db: Client, channelId: string, limit: number): Promise<MessageRecord[]> {
   const result = await db.execute({
-    sql: `SELECT * FROM messages WHERE channel_id = ? ORDER BY timestamp DESC LIMIT ?`,
+    sql: `
+      SELECT m.* FROM messages m
+      WHERE m.channel_id = ?
+        AND m.id NOT IN (SELECT message_id FROM message_events WHERE event_type = 'delete')
+      ORDER BY m.timestamp DESC
+      LIMIT ?
+    `,
     args: [channelId, limit],
   })
   return result.rows.map(rowToMessageRecord)
 }
 
 export async function getMessagesSince(db: Client, channelId: string, timestamp: string, excludeAuthorId?: string): Promise<MessageRecord[]> {
-    let sql = `SELECT * FROM messages WHERE channel_id = ? AND timestamp > ?`
+    let sql = `
+      SELECT m.* FROM messages m
+      WHERE m.channel_id = ?
+        AND m.timestamp > ?
+        AND m.id NOT IN (SELECT message_id FROM message_events WHERE event_type = 'delete')
+    `
     const args: (string | number)[] = [channelId, timestamp]
 
     if (excludeAuthorId) {
-        sql += ` AND author_id != ?`
+        sql += ` AND m.author_id != ?`
         args.push(excludeAuthorId)
     }
 
-    sql += ` ORDER BY timestamp DESC`
+    sql += ` ORDER BY m.timestamp DESC`
 
     const result = await db.execute({ sql, args })
     return result.rows.map(rowToMessageRecord)
@@ -389,7 +412,14 @@ export async function getMessagesSince(db: Client, channelId: string, timestamp:
 
 export async function getMessagesBefore(db: Client, channelId: string, beforeId: string, limit: number): Promise<MessageRecord[]> {
   const result = await db.execute({
-    sql: `SELECT * FROM messages WHERE channel_id = ? AND id < ? ORDER BY timestamp DESC LIMIT ?`,
+    sql: `
+      SELECT m.* FROM messages m
+      WHERE m.channel_id = ?
+        AND m.id < ?
+        AND m.id NOT IN (SELECT message_id FROM message_events WHERE event_type = 'delete')
+      ORDER BY m.timestamp DESC
+      LIMIT ?
+    `,
     args: [channelId, beforeId, limit],
   })
   return result.rows.map(rowToMessageRecord)
@@ -401,4 +431,50 @@ export async function getNewestMessageTimestamp(db: Client, channelId: string): 
     args: [channelId],
   })
   return (result.rows[0]?.timestamp as string) || null
+}
+
+/**
+ * Record a message event (delete, edit, etc.)
+ * @param db The libSQL client to use.
+ * @param messageId The ID of the message.
+ * @param eventType The type of event (e.g., 'delete', 'edit').
+ */
+export async function recordMessageEvent(db: Client, messageId: string, eventType: string): Promise<void> {
+  await db.execute({
+    sql: `INSERT INTO message_events (message_id, event_type, timestamp) VALUES (?, ?, ?)`,
+    args: [messageId, eventType, new Date().toISOString()],
+  })
+}
+
+/**
+ * Check if a message has been deleted
+ * @param db The libSQL client to use.
+ * @param messageId The ID of the message.
+ * @returns True if the message has a delete event.
+ */
+export async function isMessageDeleted(db: Client, messageId: string): Promise<boolean> {
+  const result = await db.execute({
+    sql: `SELECT 1 FROM message_events WHERE message_id = ? AND event_type = 'delete' LIMIT 1`,
+    args: [messageId],
+  })
+  return result.rows.length > 0
+}
+
+/**
+ * Get all deleted message IDs for a channel
+ * @param db The libSQL client to use.
+ * @param channelId The ID of the channel.
+ * @returns Set of deleted message IDs.
+ */
+export async function getDeletedMessageIds(db: Client, channelId: string): Promise<Set<string>> {
+  const result = await db.execute({
+    sql: `
+      SELECT DISTINCT me.message_id
+      FROM message_events me
+      JOIN messages m ON me.message_id = m.id
+      WHERE m.channel_id = ? AND me.event_type = 'delete'
+    `,
+    args: [channelId],
+  })
+  return new Set(result.rows.map(row => String(row.message_id)))
 }
