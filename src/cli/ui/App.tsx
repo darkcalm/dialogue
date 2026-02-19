@@ -6,10 +6,11 @@
 import React, { useReducer, useCallback, useEffect, useState } from 'react'
 import { render, Box, Text, useApp, useInput, useStdout } from 'ink'
 import { IPlatformClient } from '@/platforms/types'
-import type { SectionName } from '../inbox'
+type SectionName = 'new' | 'following' | 'unfollowed_new' | 'unfollowed'
 import {
   ChannelInfo,
   MessageInfo,
+  ReplyView,
   loadMessagesFromPlatform,
   loadOlderMessagesFromPlatform,
   markChannelVisited,
@@ -49,6 +50,7 @@ export type FlatItem =
   | { type: 'header'; sectionName: string; displayIndex: number }
   | { type: 'channel'; channelId: string; displayIndex: number }
   | { type: 'message'; channelId: string; messageIndex: number; messageId: string }
+  | { type: 'draft'; channelId: string; draftId: string }
   | { type: 'input'; channelId: string }
 
 // Focus mode in unified view
@@ -67,6 +69,7 @@ export interface AppState {
   // Unified view state - flat navigation model
   expandedChannels: Set<string> // Channel IDs that are expanded
   expandedChannelData: Map<string, ExpandedChannelData> // Messages for each expanded channel
+  replyViewsByChannel: Map<string, ReplyView[]>
   flatItems: FlatItem[] // Computed flat list of all visible items
   selectedFlatIndex: number // Position in flat list
   focusMode: UnifiedFocusMode // Are we navigating or composing?
@@ -86,6 +89,9 @@ export interface AppState {
   reactingToMessageId: string | null
   editingMessageId: string | null
   editingChannelId: string | null
+  activeReplyViewId: string | null
+  activeReplyViewChannelId: string | null
+  activeReplyTargetChannelId: string | null
   attachedFiles: Array<{ path: string; name: string }>
   llmOriginalText: string
   llmProcessedText: string
@@ -156,6 +162,9 @@ type Action =
   | { type: 'MARK_CHANNEL_READ'; channelId: string }
   | { type: 'SCROLL_VIEWPORT'; delta: number }
   | { type: 'SET_VIEWPORT_OFFSET'; offset: number }
+  | { type: 'SET_REPLY_VIEWS'; replyViews: Map<string, ReplyView[]> }
+  | { type: 'REMOVE_REPLY_VIEW'; channelId: string; replyViewId: string }
+  | { type: 'SET_ACTIVE_REPLY_VIEW'; replyViewId: string | null; channelId: string | null; targetChannelId: string | null }
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -298,9 +307,32 @@ function reducer(state: AppState, action: Action): AppState {
         attachedFiles: [],
         llmOriginalText: '',
         llmProcessedText: '',
+        activeReplyViewId: null,
+        activeReplyViewChannelId: null,
+        activeReplyTargetChannelId: null,
       }
     case 'SET_DIMENSIONS':
       return { ...state, rows: action.rows, cols: action.cols }
+    case 'SET_REPLY_VIEWS':
+      return { ...state, replyViewsByChannel: action.replyViews }
+    case 'REMOVE_REPLY_VIEW': {
+      const updatedReplies = new Map(state.replyViewsByChannel)
+      const current = updatedReplies.get(action.channelId) || []
+      const remaining = current.filter((reply) => reply.id !== action.replyViewId)
+      if (remaining.length > 0) {
+        updatedReplies.set(action.channelId, remaining)
+      } else {
+        updatedReplies.delete(action.channelId)
+      }
+      return { ...state, replyViewsByChannel: updatedReplies }
+    }
+    case 'SET_ACTIVE_REPLY_VIEW':
+      return {
+        ...state,
+        activeReplyViewId: action.replyViewId,
+        activeReplyViewChannelId: action.channelId,
+        activeReplyTargetChannelId: action.targetChannelId,
+      }
     // Unified view reducers
     case 'TOGGLE_CHANNEL_EXPAND': {
       const newExpanded = new Set(state.expandedChannels)
@@ -419,6 +451,7 @@ function buildFlatItems(
   channels: ChannelInfo[],
   expandedChannels: Set<string>,
   expandedChannelData: Map<string, ExpandedChannelData>,
+  replyViewsByChannel: Map<string, ReplyView[]>,
   getChannelFromDisplayIndex: (index: number, channels: ChannelInfo[]) => ChannelInfo | null,
   readerFocusChannel: string | null,
   channelMessageOffsets: Map<string, number>
@@ -468,6 +501,10 @@ function buildFlatItems(
               })
             }
           }
+          const replies = replyViewsByChannel.get(channel.id) || []
+          for (const reply of replies) {
+            items.push({ type: 'draft', channelId: channel.id, draftId: reply.id })
+          }
           // Add input line for expanded channel
           items.push({ type: 'input', channelId: channel.id })
         }
@@ -485,10 +522,62 @@ function findInputIndexForChannel(flatItems: FlatItem[], channelId: string): num
 
 // Get the channel ID that a flat item belongs to (or the nearest one for headers)
 function getChannelIdFromFlatItem(item: FlatItem): string | null {
-  if (item.type === 'channel' || item.type === 'message' || item.type === 'input') {
+  if (item.type === 'channel' || item.type === 'message' || item.type === 'input' || item.type === 'draft') {
     return item.channelId // Corrected to use item.channelId for ChannelInfo
   }
   return null
+}
+
+function formatReplyViewDetail(replyView: ReplyView): {
+  author: string
+  timestamp: string
+  content: string
+} {
+  const archiveLines = replyView.archiveHighlights.length > 0
+    ? replyView.archiveHighlights.map((hit) => {
+        const channelLabel = hit.channelName ? `#${hit.channelName}` : hit.channelId
+        const snippet = hit.content.replace(/\s+/g, ' ').slice(0, 200)
+        return `- ${hit.author} (${channelLabel}): ${snippet}`
+      })
+    : ['- (none)']
+
+  const webLines = replyView.webSearchResults.length > 0
+    ? replyView.webSearchResults.map((item) => `- ${item.title}: ${item.snippet} (${item.url})`)
+    : ['- (none)']
+
+  const attachmentLines = replyView.attachments && replyView.attachments.length > 0
+    ? replyView.attachments.map((file) => `- ${file.name}: ${file.path}`)
+    : ['- (none)']
+
+  const content = [
+    `Target: ${replyView.targetGuildName ? `${replyView.targetGuildName} / ` : ''}#${replyView.targetChannelName || replyView.targetChannelId}`,
+    `Source: ${replyView.sourceAuthor} @ ${replyView.sourceTimestamp}`,
+    `Scores: interestingness ${replyView.interestingnessScore.toFixed(2)} · novelty ${replyView.noveltyScore.toFixed(2)} · curiosity ${replyView.curiosityScore.toFixed(2)} · recency ${replyView.recencyScore.toFixed(2)}`,
+    '',
+    'Draft:',
+    replyView.draft.trim(),
+    '',
+    'Archive Highlights:',
+    ...archiveLines,
+    '',
+    'Web Search Results:',
+    ...webLines,
+    '',
+    'Tools Used:',
+    replyView.toolsUsed.length > 0 ? `- ${replyView.toolsUsed.join(', ')}` : '- (none)',
+    '',
+    'Skills Used:',
+    replyView.skillsUsed.length > 0 ? `- ${replyView.skillsUsed.join(', ')}` : '- (none)',
+    '',
+    'Attachments:',
+    ...attachmentLines,
+  ].join('\n')
+
+  return {
+    author: `Reply view for ${replyView.sourceAuthor}`,
+    timestamp: `interestingness ${replyView.interestingnessScore.toFixed(2)}`,
+    content,
+  }
 }
 
 // ==================== Components ====================
@@ -885,10 +974,12 @@ interface UnifiedViewProps {
   selectedFlatIndex: number
   expandedChannels: Set<string>
   expandedChannelData: Map<string, ExpandedChannelData>
+  replyViewsByChannel: Map<string, ReplyView[]>
   focusMode: UnifiedFocusMode
   readerFocusChannel: string | null
   readerSelectedMessageOffset: number
   channelMessageOffsets: Map<string, number>
+  replyViewMode: boolean
   inputText: string
   inputCursorPos: number
   onInputChange: (text: string) => void
@@ -910,10 +1001,12 @@ function UnifiedView({
   selectedFlatIndex,
   expandedChannels,
   expandedChannelData,
+  replyViewsByChannel,
   focusMode,
   readerFocusChannel,
   readerSelectedMessageOffset,
   channelMessageOffsets,
+  replyViewMode,
   inputText,
   inputCursorPos,
   onInputChange,
@@ -977,18 +1070,16 @@ function UnifiedView({
               {'    '}⏳ Loading messages...
             </Text>
           )
-        } else if (data && data.messages.length === 0) {
+        } else if (data && data.messages.length === 0 && !replyViewMode) {
           allRenderedItems.push(
             <Text key={`empty-${channel.id}`} color="gray">
               {'    '}(no messages)
             </Text>
           )
-        } else if (data) {
+        } else if (data && !data.isLoading && data.messages.length > 0) {
           while (flatIdx < flatItems.length) {
             const currentItem = flatItems[flatIdx]
-            if (currentItem.type !== 'message') break
-            if (currentItem.channelId !== channel.id) break
-
+            if (currentItem.type !== 'message' || currentItem.channelId !== channel.id) break
             const isNavSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
             const isReaderChannel = readerFocusChannel === channel.id
             const readerOffset = channelMessageOffsets.get(channel.id) || 0
@@ -1026,6 +1117,28 @@ function UnifiedView({
             }
             flatIdx++
           }
+        }
+
+        while (flatIdx < flatItems.length) {
+          const currentItem = flatItems[flatIdx]
+          if (currentItem.type !== 'draft' || currentItem.channelId !== channel.id) break
+          const draft = replyViewsByChannel.get(channel.id)?.find((entry) => entry.id === currentItem.draftId)
+          const isSelected = flatIdx === selectedFlatIndex && focusMode === 'navigation'
+          if (draft) {
+            const interestLabel = `${draft.interestingnessScore.toFixed(2)} interest`
+            const firstLine = draft.draft.split('\n')[0]
+            const prefix = `    ${isSelected ? '▶ ' : '  '}💡 Reply (${interestLabel}): `
+            const maxContentLen = Math.max(10, cols - prefix.length - 2)
+            const truncatedContent = firstLine.length > maxContentLen ? firstLine.slice(0, maxContentLen - 1) + '…' : firstLine
+            allRenderedItems.push(
+              <Text key={`draft-${draft.id}`} inverse={isSelected} color={isSelected ? 'magenta' : 'cyan'}>
+                {'    '}
+                {isSelected ? '▶ ' : '  '}
+                💡 Reply ({interestLabel}): {truncatedContent}
+              </Text>
+            )
+          }
+          flatIdx++
         }
 
         if (flatIdx < flatItems.length && flatItems[flatIdx].type === 'input') {
@@ -1110,6 +1223,9 @@ export interface AppProps {
   getOlderMessagesForChannel: (channel: ChannelInfo, oldestMessageId: string, limit: number) => Promise<{ messages: MessageInfo[]; newCount: number; hasMore: boolean }>
   /** Channels with new messages (will be auto-expanded and loaded on startup) */
   channelsWithNewMessages?: ChannelInfo[]
+  replyViewsByChannel?: Map<string, ReplyView[]>
+  replyViewMode?: boolean
+  onRemoveReplyView?: (replyViewId: string) => void | Promise<void>
   onChannelSelect?: (channel: ChannelInfo) => void
   getChannelFromDisplayIndex?: (
     index: number,
@@ -1120,16 +1236,17 @@ export interface AppProps {
   onRefreshChannels?: () => Promise<{
     channels: ChannelInfo[]
     displayItems: string[]
+    replyViewsByChannel?: Map<string, ReplyView[]>
   }>
   onFollowChannel?: (
     channel: ChannelInfo
-  ) => Promise<{ channels: ChannelInfo[]; displayItems: string[] }>
+  ) => Promise<{ channels: ChannelInfo[]; displayItems: string[]; replyViewsByChannel?: Map<string, ReplyView[]> }>
   onUnfollowChannel?: (
     channel: ChannelInfo
-  ) => Promise<{ channels: ChannelInfo[]; displayItems: string[] }>
+  ) => Promise<{ channels: ChannelInfo[]; displayItems: string[]; replyViewsByChannel?: Map<string, ReplyView[]> }>
   onToggleSection?: (
     section: SectionName
-  ) => Promise<{ channels: ChannelInfo[]; displayItems: string[] }>
+  ) => Promise<{ channels: ChannelInfo[]; displayItems: string[]; replyViewsByChannel?: Map<string, ReplyView[]> }>
 }
 
 export function App({
@@ -1140,6 +1257,9 @@ export function App({
   getMessagesForChannel, // New prop
   getOlderMessagesForChannel, // New prop
   channelsWithNewMessages = [],
+  replyViewsByChannel: initialReplyViewsByChannel = new Map(),
+  replyViewMode = false,
+  onRemoveReplyView,
   onChannelSelect,
   getChannelFromDisplayIndex: getChannelFromDisplayIndexProp,
   onExit,
@@ -1165,12 +1285,15 @@ export function App({
   const displayItems = initialDisplayItems ||
     initialChannels.map((c) => `${c.guildName ? `${c.guildName} / ` : ''}${c.name}`)
 
+  const initialReplyViews = new Map(initialReplyViewsByChannel)
+
   // Build initial flat items (no channels expanded initially)
   const initialFlatItems = buildFlatItems(
     displayItems,
     initialChannels,
     new Set<string>(),
     new Map<string, ExpandedChannelData>(),
+    initialReplyViews,
     getChannelFromDisplayIndex,
     null,
     new Map<string, number>()
@@ -1194,6 +1317,7 @@ export function App({
     // Unified view state - flat navigation
     expandedChannels: new Set<string>(),
     expandedChannelData: new Map<string, ExpandedChannelData>(),
+    replyViewsByChannel: initialReplyViews,
     flatItems: initialFlatItems,
     selectedFlatIndex: findFirstSelectableIndex(initialFlatItems),
     focusMode: 'navigation' as UnifiedFocusMode,
@@ -1212,6 +1336,9 @@ export function App({
     reactingToMessageId: null,
     editingMessageId: null,
     editingChannelId: null,
+    activeReplyViewId: null,
+    activeReplyViewChannelId: null,
+    activeReplyTargetChannelId: null,
     attachedFiles: [],
     llmOriginalText: '',
     llmProcessedText: '',
@@ -1290,12 +1417,13 @@ export function App({
       state.channels,
       state.expandedChannels,
       state.expandedChannelData,
+      state.replyViewsByChannel,
       getChannelFromDisplayIndex,
       state.readerFocusChannel,
       state.channelMessageOffsets
     )
     dispatch({ type: 'SET_FLAT_ITEMS', items: newFlatItems })
-  }, [state.channelDisplayItems, state.channels, state.expandedChannels, state.expandedChannelData, getChannelFromDisplayIndex, state.readerFocusChannel, state.channelMessageOffsets])
+  }, [state.channelDisplayItems, state.channels, state.expandedChannels, state.expandedChannelData, state.replyViewsByChannel, getChannelFromDisplayIndex, state.readerFocusChannel, state.channelMessageOffsets])
 
   // Auto-scroll viewport to keep selected item visible
   useEffect(() => {
@@ -1320,6 +1448,112 @@ export function App({
     },
     [getMessagesForChannel]
   )
+
+  const findReplyView = useCallback(
+    (channelId: string, replyViewId: string) => {
+      return state.replyViewsByChannel.get(channelId)?.find((draft) => draft.id === replyViewId) || null
+    },
+    [state.replyViewsByChannel]
+  )
+
+  const startReplyCompose = useCallback(
+    (replyView: ReplyView, replyViewChannelId: string) => {
+      dispatch({ type: 'RESET_MESSAGE_STATE' })
+      const inputIdx = findInputIndexForChannel(state.flatItems, replyViewChannelId)
+      if (inputIdx !== -1) {
+        dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIdx })
+      }
+      const channel = state.channels.find(c => c.id === replyViewChannelId)
+      if (channel) {
+        dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
+      }
+      dispatch({ type: 'SET_INPUT_TEXT', text: replyView.draft })
+      dispatch({ type: 'SET_INPUT_CURSOR_POS', pos: replyView.draft.length })
+      dispatch({
+        type: 'SET_ACTIVE_REPLY_VIEW',
+        replyViewId: replyView.id,
+        channelId: replyViewChannelId,
+        targetChannelId: replyView.targetChannelId,
+      })
+      if (replyView.attachments && replyView.attachments.length > 0) {
+        dispatch({ type: 'CLEAR_ATTACHMENTS' })
+        replyView.attachments.forEach((file) => dispatch({ type: 'ADD_ATTACHMENT', file }))
+      }
+      dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+    },
+    [state.channels, state.flatItems]
+  )
+
+  const discardReplyView = useCallback(
+    async (replyViewId: string, channelId: string) => {
+      dispatch({ type: 'REMOVE_REPLY_VIEW', channelId, replyViewId })
+      if (onRemoveReplyView) {
+        await onRemoveReplyView(replyViewId)
+      }
+    },
+    [onRemoveReplyView]
+  )
+
+  useEffect(() => {
+    const autoExpand = async () => {
+      const channelIds = new Set<string>()
+      for (const channel of channelsWithNewMessages) channelIds.add(channel.id)
+      for (const channelId of state.replyViewsByChannel.keys()) channelIds.add(channelId)
+      if (channelIds.size === 0) return
+
+      const updatedExpanded = new Set(state.expandedChannels)
+      const updatedData = new Map(state.expandedChannelData)
+
+      for (const channelId of channelIds) {
+        const channel = state.channels.find((c) => c.id === channelId)
+        if (!channel) continue
+        if (!updatedExpanded.has(channelId)) {
+          updatedExpanded.add(channelId)
+          updatedData.set(channelId, {
+            channelId,
+            messages: [],
+            isLoading: replyViewMode ? false : true,
+            hasMoreOlderMessages: true,
+          })
+        }
+      }
+
+      dispatch({ type: 'SET_EXPANDED_CHANNELS', expandedChannels: updatedExpanded, expandedChannelData: updatedData })
+
+      if (!replyViewMode) {
+        for (const channelId of channelIds) {
+          const channel = state.channels.find((c) => c.id === channelId)
+          if (!channel) continue
+          try {
+            const messages = await loadMessagesForChannelInternal(channel)
+            dispatch({
+              type: 'SET_EXPANDED_CHANNEL_DATA',
+              channelId: channel.id,
+              data: {
+                channelId: channel.id,
+                messages,
+                isLoading: false,
+                hasMoreOlderMessages: true,
+              },
+            })
+          } catch {
+            dispatch({
+              type: 'SET_EXPANDED_CHANNEL_DATA',
+              channelId: channel.id,
+              data: {
+                channelId: channel.id,
+                messages: [],
+                isLoading: false,
+                hasMoreOlderMessages: true,
+              },
+            })
+          }
+        }
+      }
+    }
+
+    void autoExpand()
+  }, [channelsWithNewMessages, state.replyViewsByChannel, state.channels, state.expandedChannels, state.expandedChannelData, loadMessagesForChannelInternal, replyViewMode])
 
 
 
@@ -1403,8 +1637,11 @@ export function App({
     dispatch({ type: 'SET_LOADING', loading: true })
     dispatch({ type: 'SET_STATUS', text: 'Refreshing inbox...' })
     try {
-      const { channels, displayItems } = await onRefreshChannels()
+      const { channels, displayItems, replyViewsByChannel } = await onRefreshChannels()
       dispatch({ type: 'SET_CHANNELS', channels, displayItems })
+      if (replyViewsByChannel) {
+        dispatch({ type: 'SET_REPLY_VIEWS', replyViews: replyViewsByChannel })
+      }
       // Reset selection to first non-header
       let newIndex = 0
       for (let i = 0; i < displayItems.length; i++) {
@@ -1734,12 +1971,17 @@ export function App({
         }
 
         // Send message via platform client
+        const targetChannelId = state.activeReplyTargetChannelId || state.selectedChannel.id
         await client.sendMessage({
           content: messageText,
-          channelId: state.selectedChannel.id,
+          channelId: targetChannelId,
           replyToMessageId: state.replyingToMessageId || undefined,
           attachments: attachments.length > 0 ? attachments : undefined,
         })
+
+        if (state.activeReplyViewId && state.activeReplyViewChannelId) {
+          await discardReplyView(state.activeReplyViewId, state.activeReplyViewChannelId)
+        }
 
         dispatch({ type: 'RESET_MESSAGE_STATE' })
         dispatch({ type: 'SET_FOCUS_MODE', mode: 'navigation' })
@@ -1774,9 +2016,13 @@ export function App({
       state.reactingToMessageId,
       state.editingMessageId,
       state.editingChannelId,
+      state.activeReplyTargetChannelId,
+      state.activeReplyViewId,
+      state.activeReplyViewChannelId,
       state.channels,
       state.expandedChannelData,
       loadMessagesForChannelInternal,
+      discardReplyView,
     ]
   )
 
@@ -1942,27 +2188,40 @@ export function App({
           data: {
             channelId: channel.id,
             messages: [],
-            isLoading: true,
+            isLoading: replyViewMode ? false : true,
             hasMoreOlderMessages: true,
           },
         })
 
-        // Mark as visited
-        markChannelVisited(channel.id, undefined, client?.type || 'discord')
+        if (!replyViewMode) {
+          // Mark as visited
+          markChannelVisited(channel.id, undefined, client?.type || 'discord')
 
-        try {
-          const messages = await loadMessagesForChannelInternal(channel)
-          dispatch({
-            type: 'SET_EXPANDED_CHANNEL_DATA',
-            channelId: channel.id,
-            data: {
+          try {
+            const messages = await loadMessagesForChannelInternal(channel)
+            dispatch({
+              type: 'SET_EXPANDED_CHANNEL_DATA',
               channelId: channel.id,
-              messages,
-              isLoading: false,
-              hasMoreOlderMessages: true,
-            },
-          })
-        } catch {
+              data: {
+                channelId: channel.id,
+                messages,
+                isLoading: false,
+                hasMoreOlderMessages: true,
+              },
+            })
+          } catch {
+            dispatch({
+              type: 'SET_EXPANDED_CHANNEL_DATA',
+              channelId: channel.id,
+              data: {
+                channelId: channel.id,
+                messages: [],
+                isLoading: false,
+                hasMoreOlderMessages: false,
+              },
+            })
+          }
+        } else {
           dispatch({
             type: 'SET_EXPANDED_CHANNEL_DATA',
             channelId: channel.id,
@@ -1976,7 +2235,7 @@ export function App({
         }
       }
     },
-    [state.expandedChannels, loadMessagesForChannelInternal, client?.type]
+    [state.expandedChannels, loadMessagesForChannelInternal, client?.type, replyViewMode]
   )
 
   // Refresh all expanded channels
@@ -1986,28 +2245,33 @@ export function App({
 
     // First refresh the channel list
     if (onRefreshChannels) {
-      const { channels, displayItems: newDisplayItems } = await onRefreshChannels()
+      const { channels, displayItems: newDisplayItems, replyViewsByChannel } = await onRefreshChannels()
       dispatch({ type: 'SET_CHANNELS', channels, displayItems: newDisplayItems })
+      if (replyViewsByChannel) {
+        dispatch({ type: 'SET_REPLY_VIEWS', replyViews: replyViewsByChannel })
+      }
     }
 
     // Then refresh messages for expanded channels
-    for (const channelId of state.expandedChannels) {
-      const channel = state.channels.find((c) => c.id === channelId)
-      if (channel) {
-        try {
-          const messages = await loadMessagesForChannelInternal(channel)
-          dispatch({
-            type: 'SET_EXPANDED_CHANNEL_DATA',
-            channelId: channel.id,
-            data: {
+    if (!replyViewMode) {
+      for (const channelId of state.expandedChannels) {
+        const channel = state.channels.find((c) => c.id === channelId)
+        if (channel) {
+          try {
+            const messages = await loadMessagesForChannelInternal(channel)
+            dispatch({
+              type: 'SET_EXPANDED_CHANNEL_DATA',
               channelId: channel.id,
-              messages,
-              isLoading: false,
-              hasMoreOlderMessages: true,
-            },
-          })
-        } catch {
-          // Keep existing data on error
+              data: {
+                channelId: channel.id,
+                messages,
+                isLoading: false,
+                hasMoreOlderMessages: true,
+              },
+            })
+          } catch {
+            // Keep existing data on error
+          }
         }
       }
     }
@@ -2017,7 +2281,7 @@ export function App({
       type: 'SET_STATUS',
       text: `${title}`,
     })
-  }, [state.expandedChannels, state.channels, loadMessagesForChannelInternal, onRefreshChannels, title])
+  }, [state.expandedChannels, state.channels, loadMessagesForChannelInternal, onRefreshChannels, title, replyViewMode])
   
   // ==================== KEYBOARD INPUT HANDLING ====================
   useInput(
@@ -2065,6 +2329,9 @@ export function App({
             return
           }
           if (state.focusMode === 'compose') {
+            if (state.activeReplyViewId && state.activeReplyViewChannelId) {
+              void discardReplyView(state.activeReplyViewId, state.activeReplyViewChannelId)
+            }
             dispatch({ type: 'RESET_MESSAGE_STATE' })
             dispatch({ type: 'SET_FOCUS_MODE', mode: 'navigation' })
             dispatch({ type: 'SET_STATUS', text: `${title}` })
@@ -2133,6 +2400,13 @@ export function App({
                   }
                   return
                 }
+                if (selectedFlatItem?.type === 'draft') {
+                  const replyView = findReplyView(selectedFlatItem.channelId, selectedFlatItem.draftId)
+                  if (replyView) {
+                    startReplyCompose(replyView, selectedFlatItem.channelId)
+                  }
+                  return
+                }
                 if (selectedFlatItem?.type === 'input') {
                   // Enter compose mode
                   const channel = state.channels.find(c => c.id === selectedFlatItem.channelId)
@@ -2150,6 +2424,13 @@ export function App({
               }
               if (input === 'i') {
                 // Enter compose mode for the currently selected channel/input line
+                if (selectedFlatItem?.type === 'draft') {
+                  const replyView = findReplyView(selectedFlatItem.channelId, selectedFlatItem.draftId)
+                  if (replyView) {
+                    startReplyCompose(replyView, selectedFlatItem.channelId)
+                  }
+                  return
+                }
                 const inputIdx = findInputIndexForChannel(state.flatItems, getChannelIdFromFlatItem(selectedFlatItem!)!)
                 if (inputIdx !== -1) {
                   dispatch({ type: 'SELECT_FLAT_INDEX', index: inputIdx })
@@ -2158,6 +2439,13 @@ export function App({
                     dispatch({ type: 'SET_SELECTED_CHANNEL', channel })
                   }
                   dispatch({ type: 'SET_FOCUS_MODE', mode: 'compose' })
+                }
+                return
+              }
+              if (input === 'x') {
+                if (selectedFlatItem?.type === 'draft') {
+                  void discardReplyView(selectedFlatItem.draftId, selectedFlatItem.channelId)
+                  dispatch({ type: 'SET_STATUS', text: '🗑️ Reply view discarded' })
                 }
                 return
               }
@@ -2237,6 +2525,13 @@ export function App({
                       content: msg.content,
                       reactions: Array.isArray(msg.reactions) && msg.reactions.length > 0 ? msg.reactions : undefined
                     }})
+                  }
+                }
+                if (selectedFlatItem?.type === 'draft') {
+                  const replyView = findReplyView(selectedFlatItem.channelId, selectedFlatItem.draftId)
+                  if (replyView) {
+                    const detail = formatReplyViewDetail(replyView)
+                    dispatch({ type: 'SET_MESSAGE_DETAIL', detail })
                   }
                 }
                 return
@@ -2651,7 +2946,7 @@ export function App({
             break
         }
       },
-      [state, exit, sendMessage, refreshAllChannels, onFollowChannel, onUnfollowChannel, onToggleSection, title, client?.type, addReaction]
+      [state, exit, sendMessage, refreshAllChannels, onFollowChannel, onUnfollowChannel, onToggleSection, title, client?.type, addReaction, startReplyCompose, findReplyView, discardReplyView]
     ),
   )
 
@@ -2661,25 +2956,41 @@ export function App({
     { key: 'Esc', label: 'back/exit' },
     { key: 'R', label: 'refresh' },
   ]
+  const hasDrafts = Array.from(state.replyViewsByChannel.values()).some((drafts) => drafts.length > 0)
   let helpBindings: Array<{ key: string; label: string }> = []
   if (state.view === 'unified') {
     if (state.focusMode === 'navigation') {
-      helpBindings = [
-        ...commonHelpBindings,
-        { key: 'Enter/Tab', label: 'expand' },
-        { key: 'i', label: 'compose' },
-        { key: 'd', label: 'delete' },
-        { key: 'r', label: 'reply' },
-        { key: 'e', label: 'react' },
-        { key: 't', label: 'edit' },
-        { key: 'v', label: 'view' },
-        { key: 'o', label: 'open URL' },
-        { key: 'a', label: 'download' },
-        { key: 'c', label: 'copy link' },
-        { key: 'F', label: 'follow/unfollow' },
-        { key: 'j', label: 'reader mode' },
-        { key: 'k', label: 'mark read' }
-      ]
+      if (replyViewMode) {
+        helpBindings = [
+          ...commonHelpBindings,
+          { key: 'Enter/Tab', label: 'edit reply' },
+          { key: 'i', label: 'edit reply' },
+          { key: 'v', label: 'view details' },
+        ]
+        if (hasDrafts) {
+          helpBindings.push({ key: 'x', label: 'discard reply' })
+        }
+      } else {
+        helpBindings = [
+          ...commonHelpBindings,
+          { key: 'Enter/Tab', label: 'expand' },
+          { key: 'i', label: 'compose' },
+          { key: 'd', label: 'delete' },
+          { key: 'r', label: 'reply' },
+          { key: 'e', label: 'react' },
+          { key: 't', label: 'edit' },
+          { key: 'v', label: 'view' },
+          { key: 'o', label: 'open URL' },
+          { key: 'a', label: 'download' },
+          { key: 'c', label: 'copy link' },
+          { key: 'F', label: 'follow/unfollow' },
+          { key: 'j', label: 'reader mode' },
+          { key: 'k', label: 'mark read' }
+        ]
+        if (hasDrafts) {
+          helpBindings.push({ key: 'x', label: 'discard reply' })
+        }
+      }
     } else if (state.focusMode === 'compose') {
       const actionLabel = state.editingMessageId ? 'save edit' : 'send'
       helpBindings = [{ key: 'Enter', label: actionLabel }, { key: 'Esc', label: 'cancel' }]
@@ -2718,10 +3029,12 @@ export function App({
             selectedFlatIndex={state.selectedFlatIndex}
             expandedChannels={state.expandedChannels}
             expandedChannelData={state.expandedChannelData}
+            replyViewsByChannel={state.replyViewsByChannel}
             focusMode={state.focusMode}
             readerFocusChannel={state.readerFocusChannel}
             readerSelectedMessageOffset={state.readerSelectedMessageOffset}
             channelMessageOffsets={state.channelMessageOffsets}
+            replyViewMode={replyViewMode}
             inputText={state.inputText}
             inputCursorPos={state.inputCursorPos}
             onInputChange={(text) => dispatch({ type: 'SET_INPUT_TEXT', text })}

@@ -23,6 +23,11 @@ const builds = [
     name: 'inbox.mjs',
   },
   {
+    entry: join(root, 'src/cli/heartbeat.ts'),
+    outfile: join(root, 'dist-esm/heartbeat.mjs'),
+    name: 'heartbeat.mjs',
+  },
+  {
     entry: join(root, 'src/cli/archive.ts'),
     outfile: join(root, 'dist-esm/archive.mjs'),
     name: 'archive.mjs',

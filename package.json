@@ -13,6 +13,7 @@
     "check-token": "npm run build-ts && node dist/scripts/checkToken.js",
     "build:cli-esm": "node scripts/build-cli-esm.mjs",
     "inbox": "npm run build:cli-esm && node dist-esm/inbox.mjs",
+    "heartbeat": "npm run build:cli-esm && node dist-esm/heartbeat.mjs",
     "archive": "npm run build:cli-esm && node dist-esm/archive.mjs",
     "realtime": "npx tsx src/cli/realtime.ts",
     "archive:whatsapp": "npm run build:cli-esm && node dist-esm/whatsapp-archive.mjs",

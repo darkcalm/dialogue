@@ -85,6 +85,7 @@ export interface ChannelInfo {
   type: string
   guildName?: string
   guildId?: string
+  isFollowing?: boolean
 }
 
 export interface ReplyInfo {
@@ -112,6 +113,50 @@ export interface MessageInfo {
   attachments: AttachmentInfo[]
   reactions: Array<{ emoji: string; count: number; name: string; users: string[] }>
   replyTo?: ReplyInfo // Information about the message being replied to
+}
+
+export interface ReplyViewHighlight {
+  id: string
+  channelId: string
+  channelName?: string
+  author: string
+  content: string
+  timestamp: string
+}
+
+export interface ReplyViewWebResult {
+  query: string
+  title: string
+  url: string
+  snippet: string
+}
+
+export interface ReplyViewAttachment {
+  path: string
+  name: string
+}
+
+export interface ReplyView {
+  id: string
+  targetChannelId: string
+  targetChannelName?: string
+  targetGuildName?: string
+  sourceMessageId: string
+  sourceAuthor: string
+  sourceContent: string
+  sourceTimestamp: string
+  draft: string
+  attachments?: ReplyViewAttachment[]
+  noveltyScore: number
+  curiosityScore: number
+  recencyScore: number
+  interestingnessScore: number
+  archiveHighlights: ReplyViewHighlight[]
+  webSearchResults: ReplyViewWebResult[]
+  toolsUsed: string[]
+  skillsUsed: string[]
+  createdAt: string
+  updatedAt: string
 }
 
 /**
@@ -1105,5 +1150,3 @@ export const resolveEmoji = async (
   // If it's just text without colons, try as-is (might be unicode)
   return trimmed || null
 }
-
-
