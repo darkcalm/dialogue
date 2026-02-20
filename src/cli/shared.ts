@@ -141,6 +141,7 @@ export interface ReplyView {
   targetChannelId: string
   targetChannelName?: string
   targetGuildName?: string
+  targetGuildId?: string
   sourceMessageId: string
   sourceAuthor: string
   sourceContent: string

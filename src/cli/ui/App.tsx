@@ -536,10 +536,18 @@ function formatReplyViewDetail(replyView: ReplyView): {
   const archiveLines = replyView.archiveHighlights.length > 0
     ? replyView.archiveHighlights.map((hit) => {
         const channelLabel = hit.channelName ? `#${hit.channelName}` : hit.channelId
-        const snippet = hit.content.replace(/\s+/g, ' ').slice(0, 200)
-        return `- ${hit.author} (${channelLabel}): ${snippet}`
+        const snippet = hit.content.replace(/\s+/g, ' ').slice(0, 120)
+        const link = generateDiscordMessageLink(hit.channelId, hit.id, replyView.targetGuildId)
+        return `- ${hit.author} (${channelLabel}): ${snippet} (${link})`
       })
     : ['- (none)']
+
+  const sourceLink = generateDiscordMessageLink(
+    replyView.targetChannelId,
+    replyView.sourceMessageId,
+    replyView.targetGuildId
+  )
+  const sourceLine = `- Source message (${sourceLink})`
 
   const webLines = replyView.webSearchResults.length > 0
     ? replyView.webSearchResults.map((item) => `- ${item.title}: ${item.snippet} (${item.url})`)
@@ -553,24 +561,14 @@ function formatReplyViewDetail(replyView: ReplyView): {
     `Target: ${replyView.targetGuildName ? `${replyView.targetGuildName} / ` : ''}#${replyView.targetChannelName || replyView.targetChannelId}`,
     `Source: ${replyView.sourceAuthor} @ ${replyView.sourceTimestamp}`,
     `Scores: interestingness ${replyView.interestingnessScore.toFixed(2)} · novelty ${replyView.noveltyScore.toFixed(2)} · curiosity ${replyView.curiosityScore.toFixed(2)} · recency ${replyView.recencyScore.toFixed(2)}`,
-    '',
-    'Draft:',
-    replyView.draft.trim(),
-    '',
-    'Archive Highlights:',
+    `Draft: ${replyView.draft.trim()}`,
+    'References:',
+    sourceLine,
     ...archiveLines,
-    '',
-    'Web Search Results:',
     ...webLines,
-    '',
-    'Tools Used:',
-    replyView.toolsUsed.length > 0 ? `- ${replyView.toolsUsed.join(', ')}` : '- (none)',
-    '',
-    'Skills Used:',
-    replyView.skillsUsed.length > 0 ? `- ${replyView.skillsUsed.join(', ')}` : '- (none)',
-    '',
-    'Attachments:',
     ...attachmentLines,
+    `Tools: ${replyView.toolsUsed.length > 0 ? replyView.toolsUsed.join(', ') : '(none)'}`,
+    `Skills: ${replyView.skillsUsed.length > 0 ? replyView.skillsUsed.join(', ') : '(none)'}`,
   ].join('\n')
 
   return {
@@ -1503,6 +1501,7 @@ export function App({
 
       const updatedExpanded = new Set(state.expandedChannels)
       const updatedData = new Map(state.expandedChannelData)
+      let hasChanges = false
 
       for (const channelId of channelIds) {
         const channel = state.channels.find((c) => c.id === channelId)
@@ -1515,12 +1514,15 @@ export function App({
             isLoading: replyViewMode ? false : true,
             hasMoreOlderMessages: true,
           })
+          hasChanges = true
         }
       }
 
-      dispatch({ type: 'SET_EXPANDED_CHANNELS', expandedChannels: updatedExpanded, expandedChannelData: updatedData })
+      if (hasChanges) {
+        dispatch({ type: 'SET_EXPANDED_CHANNELS', expandedChannels: updatedExpanded, expandedChannelData: updatedData })
+      }
 
-      if (!replyViewMode) {
+      if (!replyViewMode && hasChanges) {
         for (const channelId of channelIds) {
           const channel = state.channels.find((c) => c.id === channelId)
           if (!channel) continue
@@ -1553,7 +1555,7 @@ export function App({
     }
 
     void autoExpand()
-  }, [channelsWithNewMessages, state.replyViewsByChannel, state.channels, state.expandedChannels, state.expandedChannelData, loadMessagesForChannelInternal, replyViewMode])
+  }, [channelsWithNewMessages, state.replyViewsByChannel, state.channels, loadMessagesForChannelInternal, replyViewMode])
 
 
 

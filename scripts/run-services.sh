@@ -21,6 +21,22 @@ if [ -f "$ARCHIVE_LOCK_FILE" ]; then
     rm "$ARCHIVE_LOCK_FILE"
 fi
 
+# Kill heartbeat service if running
+HEARTBEAT_LOCK_FILE=~/.dialogue-heartbeat.lock
+if [ -f "$HEARTBEAT_LOCK_FILE" ]; then
+    PID=$(cat "$HEARTBEAT_LOCK_FILE")
+    echo "Killing existing heartbeat service (PID: $PID)..."
+    kill -9 "$PID"
+    rm "$HEARTBEAT_LOCK_FILE"
+fi
+
+# Clear reply queue
+REPLY_QUEUE_FILE=~/.dialogue-reply-views.json
+if [ -f "$REPLY_QUEUE_FILE" ]; then
+    echo "Clearing reply queue..."
+    rm "$REPLY_QUEUE_FILE"
+fi
+
 echo "--- Starting services... ---"
 
 # Start the realtime service in the background, detached from terminal
@@ -42,6 +58,14 @@ disown "$ARCHIVE_PID"
 echo "Archive service started with PID: $ARCHIVE_PID (detached)"
 echo "Logs: /tmp/dialogue-archive.log"
 
+# Start the heartbeat service in the background, detached from terminal
+echo "Starting heartbeat service in the background..."
+nohup npm run heartbeat > /tmp/dialogue-heartbeat.log 2>&1 &
+HEARTBEAT_PID=$!
+disown "$HEARTBEAT_PID"
+echo "Heartbeat service started with PID: $HEARTBEAT_PID (detached)"
+echo "Logs: /tmp/dialogue-heartbeat.log"
+
 echo "--- Done. Both services running in the background. ---"
-echo "Realtime PID: $REALTIME_PID | Archive PID: $ARCHIVE_PID"
+echo "Realtime PID: $REALTIME_PID | Archive PID: $ARCHIVE_PID | Heartbeat PID: $HEARTBEAT_PID"
 echo "Re-run this script to stop and restart both."

@@ -21,6 +21,7 @@ import {
   ReplyViewHighlight,
   ReplyViewWebResult,
 } from './shared'
+import { HEARTBEAT_SKILLS } from '@/commands/heartbeatSkills'
 import {
   loadReplyStore,
   saveReplyStore,
@@ -195,7 +196,9 @@ async function requestReplyDraft(prompt: string): Promise<{ draft: string; novel
           {
             role: 'system',
             content:
-              'You are an inquisitive synthesis agent. Craft novel, grounded reply drafts for incoming messages by weaving in relevant past ideas. ' +
+              'You are an inquisitive synthesis agent. Craft short, grounded reply drafts that surface the core insight only. ' +
+              'Keep replies to 2-3 sentences, under 60 words, no preamble. ' +
+              'Do not mention prior people or sources. Keep references out of the draft. ' +
               'Return a JSON object with keys: draft (string), noveltyScore (number 0-1), curiosityScore (number 0-1), attachments (optional array of {path,name}). ' +
               'Only include attachments if you created files in /tmp for this reply. ' +
               'If nothing truly novel emerges, set noveltyScore below 0.5 and draft to an empty string.',
@@ -329,7 +332,7 @@ async function createReplyView(
     'Web search highlights:',
     webLines || '- (none)',
     '',
-    'Craft a reply draft that fuses the incoming message with the strongest past idea. Be specific and concrete.',
+    'Craft a concise reply that fuses the incoming message with the strongest past idea. Be specific and concrete.',
   ].join('\n')
 
   const draftResult = await requestReplyDraft(prompt)
@@ -350,6 +353,7 @@ async function createReplyView(
     targetChannelId: message.channelId,
     targetChannelName: channel.name,
     targetGuildName: channel.guildName,
+    targetGuildId: channel.guildId,
     sourceMessageId: message.id,
     sourceAuthor: message.authorName,
     sourceContent: message.content,
@@ -363,7 +367,7 @@ async function createReplyView(
     archiveHighlights,
     webSearchResults,
     toolsUsed: ['archive-search', 'web-search', 'reply-synthesis'],
-    skillsUsed: ['curiosity-ranking', 'reply-view-synthesis'],
+    skillsUsed: HEARTBEAT_SKILLS.map((skill) => skill.id),
     createdAt: now,
     updatedAt: now,
   }
@@ -406,7 +410,7 @@ async function rethinkReplyView(
     'Web search highlights:',
     webLines || '- (none)',
     '',
-    'Re-evaluate the reply draft for novelty and curiosity. Improve it if possible.',
+    'Re-evaluate the reply draft for novelty and curiosity. Improve it if possible, staying concise.',
   ].join('\n')
 
   const draftResult = await requestReplyDraft(prompt)
@@ -515,11 +519,21 @@ async function main() {
   }
 
   writeLockFile()
+  process.on('exit', () => {
+    removeLockFile()
+  })
   process.on('SIGINT', () => {
     isRunning = false
   })
   process.on('SIGTERM', () => {
     isRunning = false
+  })
+  process.on('uncaughtException', (err) => {
+    log(`⚠️  Heartbeat crash: ${err.message}`)
+  })
+  process.on('unhandledRejection', (reason) => {
+    const message = reason instanceof Error ? reason.message : String(reason)
+    log(`⚠️  Heartbeat rejection: ${message}`)
   })
 
   const realtimeDb = getClient('realtime', 'local')
@@ -539,6 +553,7 @@ async function main() {
     } catch (err) {
       log(`⚠️  Heartbeat error: ${err instanceof Error ? err.message : 'Unknown error'}`)
     }
+    log(`⏳ Next heartbeat in ${Math.round(config.DIALOGUE_HEARTBEAT_INTERVAL_MS / 1000)}s`)
     await sleep(config.DIALOGUE_HEARTBEAT_INTERVAL_MS)
   }
 

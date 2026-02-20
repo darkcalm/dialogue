@@ -1,17 +1,14 @@
-import * as commandModules from '@/commands/index'
+import { commands as registeredCommands } from '@/commands/index'
 import { REST } from '@discordjs/rest'
 import { Routes } from 'discord-api-types/v10'
 import cleanEnv from '@/helpers/env'
 
-type Command = {
-  data: unknown
-}
-
 export default async function deployCommands() {
   const commands: unknown[] = []
 
-  for (const module of Object.values<Command>(commandModules))
-    commands.push(module.data)
+  for (const command of registeredCommands) {
+    commands.push(command.data)
+  }
 
   const rest = new REST({ version: '10' }).setToken(cleanEnv.DISCORD_BOT_TOKEN)
 
